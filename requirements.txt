@@ -1,0 +1,7 @@
+torch
+transformers
+diffusers
+accelerate
+pillow
+vllm
+sglang
