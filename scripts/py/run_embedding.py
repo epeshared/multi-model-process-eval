@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import os
+import sys
 import time
 import math
 from typing import Any, Callable, Dict, List, Tuple
+
+# If output is piped to a command like `head`, stdout may be closed early.
+# Default Python behavior can emit noisy BrokenPipeError messages on exit.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 EMBED_MODELS: List[str] = [
     "qwen3-embedding-4b",
@@ -342,4 +348,12 @@ def main(argv: Any = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # When stdout is closed early (e.g. `| head`), exit quietly.
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        sys.exit(0)
