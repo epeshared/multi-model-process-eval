@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 import torch
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 try:  # AMX/ipex optional
     import intel_extension_for_pytorch as ipex  # type: ignore
@@ -31,6 +31,26 @@ def _log_backend_call(name: str, **params: Any) -> None:
         else:
             safe[k] = v
     print(f"[run_embedding] backend={name} params={safe}")
+
+
+def _is_clip_model(model_id: str, trust_remote_code: bool = True) -> bool:
+    try:
+        cfg = AutoConfig.from_pretrained(
+            model_id,
+            trust_remote_code=trust_remote_code,
+            local_files_only=True,
+        )
+        model_type = getattr(cfg, "model_type", "")
+        if isinstance(model_type, str) and model_type.lower() in {"clip", "open_clip"}:
+            return True
+        arch = getattr(cfg, "architectures", None)
+        if isinstance(arch, (list, tuple)) and any("CLIP" in str(a) for a in arch):
+            return True
+    except Exception:
+        pass
+
+    s = (model_id or "").lower()
+    return "clip" in s
 
 
 @torch.inference_mode()
@@ -74,8 +94,9 @@ def run_embedding(
         text_inputs = []
 
     if backend == "torch":
-        if mode != "text":
-            raise ValueError("Torch backend only supports text embeddings")
+        is_clip = _is_clip_model(model_id, trust_remote_code=trust_remote_code)
+        if mode != "text" and not is_clip:
+            raise ValueError("Torch backend only supports text embeddings (unless using a CLIP-style model)")
         _log_backend_call(
             "torch",
             model_id=model_id,
@@ -87,7 +108,33 @@ def run_embedding(
             texts=text_inputs,
             use_amx=use_amx,
             dtype=dtype,
+            clip=is_clip,
+            modality=mode,
         )
+        if is_clip:
+            if mode == "image":
+                return _run_torch_clip_image_embedding(
+                    model_id=model_id,
+                    images=list(data),
+                    device=device,
+                    normalize=normalize,
+                    batch_size=batch_size,
+                    trust_remote_code=trust_remote_code,
+                    use_amx=use_amx,
+                    dtype=dtype,
+                )
+            return _run_torch_clip_text_embedding(
+                model_id=model_id,
+                texts=text_inputs,
+                device=device,
+                normalize=normalize,
+                batch_size=batch_size,
+                max_length=max_length,
+                trust_remote_code=trust_remote_code,
+                use_amx=use_amx,
+                dtype=dtype,
+            )
+
         return _run_torch_embedding(
             model_id=model_id,
             texts=text_inputs,
@@ -289,6 +336,146 @@ def _run_torch_embedding(
         chunks.append(pooled.cpu())
 
     hidden = getattr(model.config, "hidden_size", 0)
+    return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
+
+
+def _run_torch_clip_text_embedding(
+    model_id: str,
+    texts: List[str],
+    device: Optional[str],
+    normalize: bool,
+    batch_size: int,
+    max_length: int,
+    trust_remote_code: bool,
+    use_amx: bool,
+    dtype: Optional[str],
+) -> torch.Tensor:
+    if not texts:
+        return torch.empty(0, 0)
+
+    try:
+        from transformers import CLIPModel, CLIPProcessor
+    except Exception as e:
+        raise RuntimeError(f"transformers CLIPModel/CLIPProcessor required for CLIP embeddings: {e}")
+
+    processor = CLIPProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    model = CLIPModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
+
+    target_device = torch.device(device) if device else model.device
+
+    target_dtype: Optional[torch.dtype] = None
+    if dtype:
+        dt = dtype.lower()
+        if dt in {"bf16", "bfloat16"}:
+            target_dtype = torch.bfloat16
+        elif dt in {"fp16", "float16", "half"}:
+            target_dtype = torch.float16
+        elif dt in {"fp32", "float32", "float"}:
+            target_dtype = torch.float32
+
+    if device == "cpu" and use_amx:
+        if IPEX_AVAILABLE:
+            model = ipex.optimize(model, dtype=target_dtype, inplace=True)
+        if target_dtype is not None:
+            model = model.to(target_dtype)
+    elif target_dtype is not None:
+        model = model.to(target_dtype)
+
+    model.to(target_device)
+
+    chunks: List[torch.Tensor] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        enc = processor(
+            text=batch,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        enc = {k: v.to(target_device) for k, v in enc.items() if hasattr(v, "to")}
+        feats = model.get_text_features(**enc)
+        if normalize:
+            feats = torch.nn.functional.normalize(feats, p=2, dim=1)
+        chunks.append(feats.cpu())
+
+    hidden = chunks[0].shape[-1] if chunks else 0
+    return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
+
+
+def _run_torch_clip_image_embedding(
+    model_id: str,
+    images: List[Any],
+    device: Optional[str],
+    normalize: bool,
+    batch_size: int,
+    trust_remote_code: bool,
+    use_amx: bool,
+    dtype: Optional[str],
+) -> torch.Tensor:
+    if not images:
+        return torch.empty(0, 0)
+
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError(f"Pillow (PIL) is required for CLIP image embeddings: {e}")
+
+    try:
+        from transformers import CLIPModel, CLIPProcessor
+    except Exception as e:
+        raise RuntimeError(f"transformers CLIPModel/CLIPProcessor required for CLIP embeddings: {e}")
+
+    processor = CLIPProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    model = CLIPModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
+
+    target_device = torch.device(device) if device else model.device
+
+    target_dtype: Optional[torch.dtype] = None
+    if dtype:
+        dt = dtype.lower()
+        if dt in {"bf16", "bfloat16"}:
+            target_dtype = torch.bfloat16
+        elif dt in {"fp16", "float16", "half"}:
+            target_dtype = torch.float16
+        elif dt in {"fp32", "float32", "float"}:
+            target_dtype = torch.float32
+
+    if device == "cpu" and use_amx:
+        if IPEX_AVAILABLE:
+            model = ipex.optimize(model, dtype=target_dtype, inplace=True)
+        if target_dtype is not None:
+            model = model.to(target_dtype)
+    elif target_dtype is not None:
+        model = model.to(target_dtype)
+
+    model.to(target_device)
+
+    chunks: List[torch.Tensor] = []
+    for i in range(0, len(images), batch_size):
+        batch = images[i : i + batch_size]
+        pil_images: List[Any] = []
+        for x in batch:
+            if isinstance(x, str):
+                pil_images.append(Image.open(x).convert("RGB"))
+            elif hasattr(x, "convert"):
+                pil_images.append(x.convert("RGB"))
+            else:
+                raise ValueError(f"Unsupported image input type for CLIP torch backend: {type(x)}")
+
+        enc = processor(images=pil_images, return_tensors="pt")
+        enc = {k: v.to(target_device) for k, v in enc.items() if hasattr(v, "to")}
+
+        # Cast pixel_values to target dtype if requested.
+        if target_dtype is not None and "pixel_values" in enc:
+            enc["pixel_values"] = enc["pixel_values"].to(dtype=target_dtype)
+
+        feats = model.get_image_features(**enc)
+        if normalize:
+            feats = torch.nn.functional.normalize(feats, p=2, dim=1)
+        chunks.append(feats.cpu())
+
+    hidden = chunks[0].shape[-1] if chunks else 0
     return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
 
 
