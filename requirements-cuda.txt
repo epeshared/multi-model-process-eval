@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+# CUDA 版 PyTorch（如需特定 CUDA 版本改 cu121 → cu118 等，并可加 ==<ver>）
+torch
+transformers
+diffusers
+accelerate
+pillow
+vllm
+sglang

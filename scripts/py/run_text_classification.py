@@ -3,15 +3,21 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, List
+from typing import Any, Dict, List
 
-from src.registry import run_model
+from src.tasks.text_classification import run_text_classification
 
 CLASSIFICATION_MODELS: List[str] = [
     "klue-roberta-intent",
     "financial-sentiment",
     "topic-classification",
 ]
+
+MODEL_ID_MAP: Dict[str, str] = {
+    "klue-roberta-intent": "bespin-global/klue-roberta-small-3i4k-intent-classification",
+    "financial-sentiment": "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis",
+    "topic-classification": "dstefa/roberta-base_topic_classification_nyt_news",
+}
 
 
 def parse_args(argv: Any = None) -> argparse.Namespace:
@@ -24,7 +30,8 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
 
 def main(argv: Any = None) -> None:
     args = parse_args(argv)
-    result = run_model(model_key=args.model, backend="torch", text=args.text, device=args.device)
+    model_id = MODEL_ID_MAP.get(args.model, args.model)
+    result = run_text_classification(model_id=model_id, text=args.text, device=args.device)
     print(json.dumps(result, indent=2, default=str))
 
 

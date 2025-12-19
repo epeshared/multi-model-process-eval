@@ -1,7 +1,4 @@
-torch
-transformers
 diffusers
-accelerate
-pillow
-vllm
-sglang
+## 选择合适的环境依赖文件安装：
+# CPU:    pip install -r requirements-cpu.txt
+# CUDA:   pip install -r requirements-cuda.txt

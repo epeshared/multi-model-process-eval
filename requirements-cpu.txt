@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+# CPU 版 PyTorch（如需特定版本可加 ==<ver>）
+torch
+transformers
+diffusers
+accelerate
+pillow

@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, List
+from typing import Any, Dict, List
 
-from src.registry import run_model
+from src.tasks.multimodal import run_vision_language_chat
 
 MULTIMODAL_MODELS: List[str] = [
     "qwen2.5-vl-7b-instruct",
     "llava-vicuna-7b",
 ]
+
+MODEL_ID_MAP: Dict[str, str] = {
+    "qwen2.5-vl-7b-instruct": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "llava-vicuna-7b": "llava-hf/llava-v1.6-vicuna-7b-hf",
+}
 
 
 def parse_args(argv: Any = None) -> argparse.Namespace:
@@ -25,10 +30,10 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
 
 def main(argv: Any = None) -> None:
     args = parse_args(argv)
-    result = run_model(
-        model_key=args.model,
-        backend="torch",
-        image=args.image,
+    model_id = MODEL_ID_MAP.get(args.model, args.model)
+    result = run_vision_language_chat(
+        model_id=model_id,
+        image_path=args.image,
         prompt=args.prompt,
         max_new_tokens=args.max_new_tokens,
         device=args.device,

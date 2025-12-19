@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import Dict
 
-from src.registry import run_model
+from src.tasks.translation import run_translation
 
 TRANSLATION_MODELS = ["opus-mt-zh-en", "opus-mt-en-zh"]
+
+MODEL_ID_MAP: Dict[str, str] = {
+    "opus-mt-zh-en": "Helsinki-NLP/opus-mt-zh-en",
+    "opus-mt-en-zh": "Helsinki-NLP/opus-mt-en-zh",
+}
 
 
 def parse_args(argv=None):
@@ -19,7 +25,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    result = run_model(model_key=args.model, backend="torch", text=args.text, device=args.device)
+    model_id = MODEL_ID_MAP.get(args.model, args.model)
+    result = run_translation(model_id=model_id, text=args.text, device=args.device)
     print(json.dumps(result, indent=2, default=str))
 
 

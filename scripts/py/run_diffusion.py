@@ -3,9 +3,22 @@ from __future__ import annotations
 
 import argparse
 
-from src.registry import run_model
+from typing import Callable, Dict
+
+from src.tasks.diffusion import run_stable_diffusion_v1, run_stable_diffusion_xl
 
 DIFFUSION_MODELS = ["stable-diffusion-v1-4", "stable-diffusion-xl"]
+
+MODEL_INFO: Dict[str, Dict[str, Callable]] = {
+    "stable-diffusion-v1-4": {
+        "model_id": "CompVis/stable-diffusion-v1-4",
+        "runner": run_stable_diffusion_v1,
+    },
+    "stable-diffusion-xl": {
+        "model_id": "stabilityai/stable-diffusion-xl-base-1.0",
+        "runner": run_stable_diffusion_xl,
+    },
+}
 
 
 def parse_args(argv=None):
@@ -19,9 +32,12 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    images = run_model(
-        model_key=args.model,
-        backend="torch",
+    info = MODEL_INFO.get(args.model, {})
+    runner = info.get("runner", run_stable_diffusion_v1)
+    model_id = info.get("model_id", args.model)
+
+    images = runner(
+        model_id=model_id,
         prompt=args.prompt,
         num_inference_steps=args.num_inference_steps,
         device=args.device,

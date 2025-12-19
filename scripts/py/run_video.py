@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import argparse
 import json
+from typing import Dict
 
-from src.registry import run_model
+from src.tasks.video import run_video_caption
 
 VIDEO_MODELS = ["video-blip-ego4d"]
+
+MODEL_ID_MAP: Dict[str, str] = {
+    "video-blip-ego4d": "kpyu/video-blip-opt-2.7b-ego4d",
+}
 
 
 def parse_args(argv=None):
@@ -19,7 +24,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    result = run_model(model_key=args.model, backend="torch", video=args.video, device=args.device)
+    model_id = MODEL_ID_MAP.get(args.model, args.model)
+    result = run_video_caption(model_id=model_id, video_path=args.video, device=args.device)
     print(json.dumps(result, indent=2, default=str))
 
 
