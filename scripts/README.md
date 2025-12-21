@@ -4,7 +4,7 @@ This folder contains small shell wrappers around the Python entrypoints in `scri
 
 ## Yahoo Answers embedding
 
-Script: `run_embedding_yahoo.sh`
+Script: `embedding/run_embedding_yahoo.sh`
 
 ### Yahoo: What it does
 
@@ -17,7 +17,7 @@ Runs text embeddings on the Yahoo Answers JSONL dataset via `scripts/py/run_embe
 You can also pass the dataset path as the first positional argument:
 
 ```bash
-./run_embedding_yahoo.sh /path/to/yahoo_answers_title_answer.jsonl
+./embedding/run_embedding_yahoo.sh /path/to/yahoo_answers_title_answer.jsonl
 ```
 
 ### Yahoo: Common env vars
@@ -54,20 +54,20 @@ Torch CPU + AMX:
 
 ```bash
 BACKEND=torch DEVICE=cpu USE_AMX=1 WARMUP_SAMPLES=100 \
-  ./run_embedding_yahoo.sh /home/xtang/datasets/yahoo_answers_title_answer.jsonl
+  ./embedding/run_embedding_yahoo.sh /home/xtang/datasets/yahoo_answers_title_answer.jsonl
 ```
 
 SGLang HTTP (server must be running):
 
 ```bash
 BACKEND=sglang BASE_URL=http://127.0.0.1:30000 WARMUP_SAMPLES=100 \
-  ./run_embedding_yahoo.sh /home/xtang/datasets/yahoo_answers_title_answer.jsonl
+  ./embedding/run_embedding_yahoo.sh /home/xtang/datasets/yahoo_answers_title_answer.jsonl
 ```
 
 
 ## Flickr8k embedding (text + image)
 
-Script: `run_embedding_flickr8k.sh`
+Script: `embedding/run_embedding_flickr8k.sh`
 
 ### Flickr8k: What it does
 
@@ -78,7 +78,7 @@ Runs Flickr8k caption text embeddings and/or image embeddings (CLIP-style multim
 You can pass positional arguments:
 
 ```bash
-./run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt /path/to/Flicker8k_Dataset
+./embedding/run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt /path/to/Flicker8k_Dataset
 ```
 
 Or set env vars:
@@ -123,12 +123,13 @@ SGLang HTTP, run both text+image:
 ```bash
 BASE_URL=http://127.0.0.1:30000 BACKEND=sglang API=v1 \
 FLICKR8K_MODALITY=both CAPTIONS_PER_IMAGE=1 MAX_SAMPLES=1000 WARMUP_SAMPLES=100 \
-  ./run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt /path/to/Flicker8k_Dataset
+  ./embedding/run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt /path/to/Flicker8k_Dataset
+  
 ```
 
 Text-only (does not require images to exist):
 
 ```bash
 BACKEND=sglang BASE_URL=http://127.0.0.1:30000 FLICKR8K_MODALITY=text \
-  ./run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt
+  ./embedding/run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt
 ```

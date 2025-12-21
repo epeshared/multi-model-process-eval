@@ -9,7 +9,7 @@ set -euo pipefail
 #   YAHOO_MODE (default: q)  # q | a | q+a
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
 MODEL=${MODEL:-qwen3-embedding-4b}
 MODEL_ID=${MODEL_ID:-/home/xtang/models/Qwen/Qwen3-Embedding-4B}

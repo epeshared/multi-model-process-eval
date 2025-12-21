@@ -27,7 +27,7 @@ set -euo pipefail
 #   USE_AMX (true/1/yes/on to enable; torch+cpu only)
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
 MODEL=${MODEL:-clip-vit-base-patch32}
 MODEL_ID=${MODEL_ID:-/home/xtang/models/openai/clip-vit-base-patch32}
