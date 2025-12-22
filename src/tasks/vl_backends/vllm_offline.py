@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from PIL import Image
+from importlib.metadata import PackageNotFoundError, version
 
 
 class VLLMOfflineVLClient:
@@ -22,16 +23,53 @@ class VLLMOfflineVLClient:
         gpu_memory_utilization: float = 0.90,
         **llm_kwargs: Dict[str, Any],
     ) -> None:
+        dev = (device or "").lower()
+        if dev.startswith("cpu"):
+            # Allow CPU only if a CPU build of vLLM is installed.
+            try:
+                vllm_ver = version("vllm")
+            except PackageNotFoundError:
+                vllm_ver = ""
+            if "cpu" not in (vllm_ver or "").lower():
+                raise RuntimeError(
+                    "backend=vllm (offline) on CPU requires a CPU build of vLLM. "
+                    "Fix: use BACKEND=torch for CPU inference, or install a CPU-capable vLLM build, "
+                    "or run a CUDA vLLM server and use BACKEND=vllm-http."
+                )
+
+        # Compatibility shim: some vLLM versions import OpenAI SDK types by old names.
+        # Newer openai releases expose ChatCompletionToolParam but not ChatCompletionFunctionToolParam.
+        try:  # pragma: no cover - best-effort import workaround
+            import openai.types.chat as _chat
+
+            if not hasattr(_chat, "ChatCompletionFunctionToolParam") and hasattr(_chat, "ChatCompletionToolParam"):
+                setattr(_chat, "ChatCompletionFunctionToolParam", getattr(_chat, "ChatCompletionToolParam"))
+        except Exception:
+            pass
         try:
             from vllm import LLM, SamplingParams  # type: ignore
         except Exception as e:  # pragma: no cover - import guard
-            raise RuntimeError(f"vllm not installed or import failed: {e}")
+            msg = str(e)
+            hint = ""
+            if "openai.types.chat" in msg or "ChatCompletionFunctionToolParam" in msg:
+                hint = (
+                    " (Hint: your 'openai' package version is likely incompatible with the installed vLLM. "
+                    "Try upgrading 'openai' to a newer 1.x release, or install a vLLM version that matches your openai.)"
+                )
+            raise RuntimeError(f"vllm not installed or import failed: {e}{hint}")
 
         self._SamplingParams = SamplingParams
+        self._tokenizer: Any = None
+        try:  # pragma: no cover - optional helper
+            from transformers import AutoTokenizer  # type: ignore
+
+            # Use the same model path/id so chat template tokens match.
+            self._tokenizer = AutoTokenizer.from_pretrained(model)
+        except Exception:
+            self._tokenizer = None
 
         init_kwargs: Dict[str, Any] = dict(
             model=model,
-            task="generate",
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             enforce_eager=False,
@@ -41,14 +79,64 @@ class VLLMOfflineVLClient:
             init_kwargs["max_model_len"] = int(max_model_len)
         init_kwargs.update(llm_kwargs)
 
-        try:
-            self.llm = LLM(**init_kwargs)
-        except TypeError:
-            # Older vLLM versions may require VLLM_DEVICE env var.
-            import os
+        # vLLM kwargs are not stable across versions; best-effort retries.
+        # - Some versions don't accept certain knobs (especially CPU builds).
+        try_kwargs = dict(init_kwargs)
 
-            os.environ["VLLM_DEVICE"] = device
-            self.llm = LLM(**init_kwargs)
+        def _try_init(kwargs: Dict[str, Any]) -> Any:
+            return LLM(**kwargs)
+
+        try:
+            self.llm = _try_init(try_kwargs)
+        except TypeError:
+            for k in ("gpu_memory_utilization", "enforce_eager"):
+                if k in try_kwargs:
+                    try_kwargs.pop(k, None)
+                    try:
+                        self.llm = _try_init(try_kwargs)
+                        break
+                    except TypeError:
+                        continue
+            else:
+                # Some vLLM versions require VLLM_DEVICE env var rather than a constructor kwarg.
+                import os
+
+                if device:
+                    os.environ.setdefault("VLLM_DEVICE", device)
+                self.llm = _try_init(try_kwargs)
+
+    def _format_multimodal_prompt(self, prompt: str) -> str:
+        """Return a prompt string containing required multimodal placeholders.
+
+        For Qwen2.5-VL, vLLM expects image placeholder tokens (e.g.
+        <|vision_start|><|image_pad|><|vision_end|>) to appear in the prompt so it
+        can align `multi_modal_data['image']` with the text.
+        """
+
+        p = prompt or ""
+
+        # If user already provided a full template, don't re-wrap.
+        if any(t in p for t in ("<|vision_start|>", "<|image_pad|>", "<|im_start|>")):
+            return p
+
+        tok = self._tokenizer
+        if tok is not None and hasattr(tok, "apply_chat_template"):
+            try:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": p},
+                        ],
+                    }
+                ]
+                return tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                pass
+
+        # Fallback: prepend the common Qwen-VL placeholder.
+        return "<|vision_start|><|image_pad|><|vision_end|>" + p
 
     def _extract_texts(self, outputs: Any) -> List[str]:
         out: List[str] = []
@@ -98,7 +186,7 @@ class VLLMOfflineVLClient:
             else:
                 # try best-effort conversion
                 pil_img = Image.open(str(img)).convert("RGB")
-            reqs.append({"prompt": prompt, "multi_modal_data": {"image": pil_img}})
+            reqs.append({"prompt": self._format_multimodal_prompt(prompt), "multi_modal_data": {"image": pil_img}})
 
         try:
             llm_any: Any = self.llm
