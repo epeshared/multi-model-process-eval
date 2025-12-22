@@ -4,9 +4,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
 import signal
 import time
 from typing import Any, Dict, List, Optional
+
+
+# Allow running this script directly without installing the package.
+# When executed as `python scripts/py/run_vl.py`, Python adds `scripts/py` to sys.path,
+# but not the repository root, so `import src...` would fail.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_repo_root_str = str(_REPO_ROOT)
+if _repo_root_str not in sys.path:
+    sys.path.insert(0, _repo_root_str)
 
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 

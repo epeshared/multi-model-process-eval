@@ -54,10 +54,21 @@ FLICKR8K_CAPTIONS_FILE=${FLICKR8K_CAPTIONS_FILE:-/home/xtang/datasets/Flickr8k/F
 
 MAX_SAMPLES=${MAX_SAMPLES:-50}
 BATCH_SIZE=${BATCH_SIZE:-1}
-DEVICE=${DEVICE:-cuda:0}
+# DEVICE=${DEVICE:-cuda:0}
+DEVICE=${DEVICE:-cpu}
 DTYPE=${DTYPE:-auto}
 USE_AMX=${USE_AMX:-0}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
+
+# SGLang VL HTTP backend requires a CUDA-capable server for multimodal models.
+# If you want CPU inference, use BACKEND=torch.
+# if [[ "${BACKEND}" == "sglang" ]] && [[ "${DEVICE}" == "cpu" || "${DEVICE}" == cpu:* ]]; then
+#   echo "[run_qwen_vl_flickr8k] ERROR: BACKEND=sglang with DEVICE=cpu is not supported for VL multimodal." >&2
+#   echo "[run_qwen_vl_flickr8k] Cause: the SGLang server typically errors with 'Torch not compiled with CUDA enabled'." >&2
+#   echo "[run_qwen_vl_flickr8k] Fix: either run with BACKEND=torch for CPU inference," >&2
+#   echo "[run_qwen_vl_flickr8k]      or start a CUDA SGLang server and set DEVICE=cuda:0." >&2
+#   exit 2
+# fi
 
 # Optional positional overrides:
 #   $1 -> captions file
