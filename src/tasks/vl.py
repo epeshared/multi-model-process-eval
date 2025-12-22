@@ -2,12 +2,6 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Union
 
-from .vl_backends.sglang_http import SGLangHTTPVLClient
-from .vl_backends.sglang_offline import SGLangOfflineVLClient
-from .vl_backends.torch_vl import TorchVisionLanguageClient
-from .vl_backends.vllm_http import VLLMHTTPVLClient
-from .vl_backends.vllm_offline import VLLMOfflineVLClient
-
 
 def _normalize_batch(
     image_paths: Union[str, Sequence[str]],
@@ -47,6 +41,8 @@ def load_vl_session(
     backend = (backend_name or "torch").lower()
 
     if backend == "torch":
+        from .vl_backends.torch_vl import TorchVisionLanguageClient
+
         torch_client = TorchVisionLanguageClient()
         runtime = torch_client.load(
             model_id=model_id,
@@ -78,6 +74,8 @@ def load_vl_session(
         return ("torch", torch_client, runtime)
 
     if backend == "sglang":
+        from .vl_backends.sglang_http import SGLangHTTPVLClient
+
         if not base_url:
             raise ValueError("base_url is required for backend=sglang")
         _ = api  # reserved for future (native/openai toggles)
@@ -92,6 +90,8 @@ def load_vl_session(
         )
 
     if backend in {"sglang-offline", "sglang_offline"}:
+        from .vl_backends.sglang_offline import SGLangOfflineVLClient
+
         if print_model_info:
             print(f"[vl.load] backend=sglang-offline model_id={model_id} device={device or 'cuda'} dtype={dtype or 'auto'}")
         return SGLangOfflineVLClient(
@@ -110,6 +110,8 @@ def load_vl_session(
         )
 
     if backend in {"vllm-http", "vllm_openai", "vllm-http-openai"}:
+        from .vl_backends.vllm_http import VLLMHTTPVLClient
+
         if not base_url:
             raise ValueError("base_url is required for backend=vllm-http")
         if print_model_info:
@@ -123,6 +125,8 @@ def load_vl_session(
         )
 
     if backend in {"vllm", "vllm-offline"}:
+        from .vl_backends.vllm_offline import VLLMOfflineVLClient
+
         if print_model_info:
             print(f"[vl.load] backend=vllm-offline model_id={model_id} device={device or 'cuda'} dtype={dtype or 'auto'}")
         return VLLMOfflineVLClient(
