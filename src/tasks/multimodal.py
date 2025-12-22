@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-import torch
-from PIL import Image
-from transformers import AutoModelForVision2Seq, AutoProcessor
+from .vl import run_vl_chat
 
 
 def run_vision_language_chat(
@@ -15,12 +13,21 @@ def run_vision_language_chat(
     device: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
-    processor = AutoProcessor.from_pretrained(model_id)
-    model = AutoModelForVision2Seq.from_pretrained(model_id, torch_dtype=torch.float16)
-    if device:
-        model.to(device)
-    image = Image.open(image_path).convert("RGB")
-    inputs = processor(images=image, text=prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, **kwargs)
-    return processor.batch_decode(generated_ids, skip_special_tokens=True)
+    # Keep API compatibility but route implementation through the VL task.
+    # Allow passing VL-specific options via kwargs without changing the signature.
+    dtype = kwargs.pop("dtype", None)
+    trust_remote_code = bool(kwargs.pop("trust_remote_code", False))
+    attn_implementation = kwargs.pop("attn_implementation", None)
+
+    return run_vl_chat(
+        model_id=model_id,
+        image_paths=image_path,
+        prompt=prompt,
+        backend_name="torch",
+        max_new_tokens=max_new_tokens,
+        device=device,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        attn_implementation=attn_implementation,
+        **kwargs,
+    )

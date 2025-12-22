@@ -25,6 +25,7 @@ set -euo pipefail
 #   DTYPE
 #   WARMUP_SAMPLES (if >1, do warmup)
 #   USE_AMX (true/1/yes/on to enable; torch+cpu only)
+#   PRINT_MODEL_INFO (true/1/yes/on to enable; prints model/client info at load)
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -48,6 +49,7 @@ DEVICE=${DEVICE:-cpu}
 DTYPE=${DTYPE:-bfloat16}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1000}
 USE_AMX=${USE_AMX:-0}
+PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 
 # Optional positional overrides:
 #   $1 -> captions file (Flickr8k.token.txt)
@@ -85,6 +87,7 @@ echo "[run_embedding_flickr8k] DEVICE=${DEVICE:-<unset>}"
 echo "[run_embedding_flickr8k] DTYPE=${DTYPE:-<unset>}"
 echo "[run_embedding_flickr8k] WARMUP_SAMPLES=${WARMUP_SAMPLES}"
 echo "[run_embedding_flickr8k] USE_AMX=${USE_AMX}"
+echo "[run_embedding_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
 if [[ $# -gt 0 ]]; then
   printf '[run_embedding_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
 else
@@ -103,6 +106,13 @@ case "${USE_AMX}" in
     ;;
 esac
 
+PRINT_MODEL_INFO_ARG=()
+case "${PRINT_MODEL_INFO}" in
+  1|true|TRUE|yes|YES|on|ON)
+    PRINT_MODEL_INFO_ARG=(--print-model-info)
+    ;;
+esac
+
 python scripts/py/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
@@ -117,6 +127,7 @@ python scripts/py/run_embedding.py \
   --batch-size "${BATCH_SIZE}" \
   --warmup-samples "${WARMUP_SAMPLES}" \
   "${USE_AMX_ARG[@]}" \
+  "${PRINT_MODEL_INFO_ARG[@]}" \
   ${BASE_URL:+--base-url "${BASE_URL}"} \
   --api "${API}" \
   --api-key "${API_KEY}" \

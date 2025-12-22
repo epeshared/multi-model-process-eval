@@ -133,3 +133,9 @@ Text-only (does not require images to exist):
 BACKEND=sglang BASE_URL=http://127.0.0.1:30000 FLICKR8K_MODALITY=text \
   ./embedding/run_embedding_flickr8k.sh /path/to/Flickr8k.token.txt
 ```
+
+## Flickr8k vision-language (Qwen2.5-VL)
+
+Script: `embedding/run_qwen_vl_flickr8k.sh`
+
+Runs a vision-language model over Flickr8k images via `scripts/py/run_vl.py`.

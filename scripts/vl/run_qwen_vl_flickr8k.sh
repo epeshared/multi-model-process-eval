@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run Qwen2.5-VL on Flickr8k images via scripts/py/run_vl.py.
+#
+# Env overrides:
+#   MODEL (default: qwen2.5-vl-7b-instruct)
+#   MODEL_ID (default: Qwen/Qwen2.5-VL-7B-Instruct)
+#   BACKEND (default: torch)
+#   PROMPT (default: "Describe the image.")
+#   FLICKR8K_IMAGES_DIR
+#   FLICKR8K_CAPTIONS_FILE (Flickr8k.token.txt)
+#   MAX_SAMPLES
+#   BATCH_SIZE
+#   DEVICE
+#   DTYPE
+#   USE_AMX (true/1/yes/on to enable; torch+cpu only)
+#   PRINT_MODEL_INFO (true/1/yes/on to enable; prints model/client info at load)
+#
+# HTTP backends:
+#   BASE_URL (for BACKEND=sglang or BACKEND=vllm-http)
+#   API (default: v1)
+#   API_KEY
+#   TIMEOUT
+#   IMAGE_TRANSPORT (data-url|path/url)
+#
+# Offline backends:
+#   TP_SIZE
+#   DP_SIZE (sglang-offline)
+#   MAX_MODEL_LEN (vllm offline)
+#   GPU_MEMORY_UTILIZATION (vllm offline)
+
+SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
+
+MODEL=${MODEL:-qwen2.5-vl-7b-instruct}
+MODEL_ID=${MODEL_ID:-/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct}
+BACKEND=${BACKEND:-torch}
+PROMPT=${PROMPT:-"Describe the image."}
+
+BASE_URL=${BASE_URL:-http://127.0.0.1:30000}
+API=${API:-v1}
+API_KEY=${API_KEY:-}
+TIMEOUT=${TIMEOUT:-600}
+IMAGE_TRANSPORT=${IMAGE_TRANSPORT:-data-url}
+
+TP_SIZE=${TP_SIZE:-1}
+DP_SIZE=${DP_SIZE:-1}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}
+
+FLICKR8K_IMAGES_DIR=${FLICKR8K_IMAGES_DIR:-/home/xtang/datasets/Flickr8k/Flicker8k_Dataset}
+FLICKR8K_CAPTIONS_FILE=${FLICKR8K_CAPTIONS_FILE:-/home/xtang/datasets/Flickr8k/Flickr8k.token.txt}
+
+MAX_SAMPLES=${MAX_SAMPLES:-50}
+BATCH_SIZE=${BATCH_SIZE:-1}
+DEVICE=${DEVICE:-cuda:0}
+DTYPE=${DTYPE:-auto}
+USE_AMX=${USE_AMX:-0}
+PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
+
+# Optional positional overrides:
+#   $1 -> captions file
+#   $2 -> images dir
+if [[ $# -gt 0 ]]; then
+  FLICKR8K_CAPTIONS_FILE="$1"
+  shift
+fi
+if [[ $# -gt 0 ]]; then
+  FLICKR8K_IMAGES_DIR="$1"
+  shift
+fi
+
+USE_AMX_ARG=()
+case "${USE_AMX}" in
+  1|true|TRUE|yes|YES|on|ON)
+    USE_AMX_ARG=(--use-amx)
+    ;;
+esac
+
+PRINT_MODEL_INFO_ARG=()
+case "${PRINT_MODEL_INFO}" in
+  1|true|TRUE|yes|YES|on|ON)
+    PRINT_MODEL_INFO_ARG=(--print-model-info)
+    ;;
+esac
+
+cd "${ROOT_DIR}"
+
+echo "[run_qwen_vl_flickr8k] MODEL=${MODEL}"
+echo "[run_qwen_vl_flickr8k] MODEL_ID=${MODEL_ID}"
+echo "[run_qwen_vl_flickr8k] BACKEND=${BACKEND}"
+echo "[run_qwen_vl_flickr8k] BASE_URL=${BASE_URL}"
+echo "[run_qwen_vl_flickr8k] API=${API}"
+echo "[run_qwen_vl_flickr8k] IMAGE_TRANSPORT=${IMAGE_TRANSPORT}"
+echo "[run_qwen_vl_flickr8k] TP_SIZE=${TP_SIZE}"
+echo "[run_qwen_vl_flickr8k] DP_SIZE=${DP_SIZE}"
+echo "[run_qwen_vl_flickr8k] MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "[run_qwen_vl_flickr8k] GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
+echo "[run_qwen_vl_flickr8k] PROMPT=${PROMPT}"
+echo "[run_qwen_vl_flickr8k] FLICKR8K_CAPTIONS_FILE=${FLICKR8K_CAPTIONS_FILE}"
+echo "[run_qwen_vl_flickr8k] FLICKR8K_IMAGES_DIR=${FLICKR8K_IMAGES_DIR}"
+echo "[run_qwen_vl_flickr8k] MAX_SAMPLES=${MAX_SAMPLES}"
+echo "[run_qwen_vl_flickr8k] BATCH_SIZE=${BATCH_SIZE}"
+echo "[run_qwen_vl_flickr8k] DEVICE=${DEVICE}"
+echo "[run_qwen_vl_flickr8k] DTYPE=${DTYPE}"
+echo "[run_qwen_vl_flickr8k] USE_AMX=${USE_AMX}"
+echo "[run_qwen_vl_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
+if [[ $# -gt 0 ]]; then
+  printf '[run_qwen_vl_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
+else
+  echo "[run_qwen_vl_flickr8k] EXTRA_ARGS=<none>"
+fi
+
+python scripts/py/run_vl.py \
+  --model "${MODEL}" \
+  --model-id "${MODEL_ID}" \
+  --backend "${BACKEND}" \
+  --dataset flickr8k \
+  --dataset-path "${FLICKR8K_CAPTIONS_FILE}" \
+  --flickr8k-captions-file "${FLICKR8K_CAPTIONS_FILE}" \
+  --flickr8k-images-dir "${FLICKR8K_IMAGES_DIR}" \
+  --max-samples "${MAX_SAMPLES}" \
+  --batch-size "${BATCH_SIZE}" \
+  --prompt "${PROMPT}" \
+  ${DEVICE:+--device "${DEVICE}"} \
+  ${DTYPE:+--dtype "${DTYPE}"} \
+  ${BASE_URL:+--base-url "${BASE_URL}"} \
+  --api "${API}" \
+  --api-key "${API_KEY}" \
+  --timeout "${TIMEOUT}" \
+  --image-transport "${IMAGE_TRANSPORT}" \
+  --tp-size "${TP_SIZE}" \
+  --dp-size "${DP_SIZE}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
+  --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+  "${USE_AMX_ARG[@]}" \
+  "${PRINT_MODEL_INFO_ARG[@]}" \
+  "$@"

@@ -119,6 +119,12 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default=False,
         help="Enable AMX/IPEX acceleration for torch CPU embeddings (requires intel_extension_for_pytorch)",
     )
+    parser.add_argument(
+        "--print-model-info",
+        action="store_true",
+        default=False,
+        help="Print backend/model info during session load",
+    )
     parser.add_argument("--encoding-format", help="Encoding format for vLLM HTTP (e.g., bf16)")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size for vLLM offline")
     parser.add_argument("--max-model-len", type=int, default=8192, help="Max model length for vLLM offline")
@@ -137,7 +143,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
 def main(argv: Any = None) -> None:
     args = parse_args(argv)
 
-    from src.tasks.embedding import run_embedding
+    from src.tasks.embedding import embed_with_session, load_embedding_session
 
     model_id = args.model_id or MODEL_ID_MAP.get(args.model, args.model)
 
@@ -156,6 +162,23 @@ def main(argv: Any = None) -> None:
 
     base_url = _norm_base_url(args.base_url)
 
+    session = load_embedding_session(
+        model_id=model_id,
+        backend_name=args.backend,
+        device=args.device,
+        trust_remote_code=True,
+        print_model_info=bool(args.print_model_info),
+        base_url=base_url,
+        api=args.api,
+        api_key=args.api_key,
+        timeout=args.timeout,
+        image_transport=args.image_transport,
+        encoding_format=args.encoding_format,
+        use_amx=args.use_amx,
+        dtype=args.dtype,
+        **backend_kwargs,
+    )
+
     def _maybe_warmup(inputs: List[Any], modality: str) -> None:
         if int(args.warmup_samples) <= 1:
             return
@@ -164,24 +187,13 @@ def main(argv: Any = None) -> None:
         if not warmup_inputs:
             return
         print(f"[run_embedding] warmup=true modality={modality} samples={len(warmup_inputs)}")
-        _ = run_embedding(
-            model_id=model_id,
-            backend_name=args.backend,
+        _ = embed_with_session(
+            session,
             inputs=warmup_inputs,
             modality=modality,
-            device=args.device,
-            base_url=base_url,
-            api=args.api,
-            api_key=args.api_key,
-            timeout=args.timeout,
-            image_transport=args.image_transport,
             batch_size=min(args.batch_size, max(1, len(warmup_inputs))),
             max_length=args.max_length,
             normalize=args.normalize,
-            encoding_format=args.encoding_format,
-            use_amx=args.use_amx,
-            dtype=args.dtype,
-            **backend_kwargs,
         )
 
     if args.dataset == "flickr8k":
@@ -210,24 +222,13 @@ def main(argv: Any = None) -> None:
         if flickr_modality in {"both", "text"}:
             _maybe_warmup(ds.texts, "text")
             t0 = time.time()
-            txt = run_embedding(
-                model_id=model_id,
-                backend_name=args.backend,
+            txt = embed_with_session(
+                session,
                 inputs=ds.texts,
                 modality="text",
-                device=args.device,
-                base_url=base_url,
-                api=args.api,
-                api_key=args.api_key,
-                timeout=args.timeout,
-                image_transport=args.image_transport,
                 batch_size=args.batch_size,
                 max_length=args.max_length,
                 normalize=args.normalize,
-                encoding_format=args.encoding_format,
-                use_amx=args.use_amx,
-                dtype=args.dtype,
-                **backend_kwargs,
             )
             t1 = time.time()
             elapsed = t1 - t0
@@ -247,24 +248,13 @@ def main(argv: Any = None) -> None:
         if flickr_modality in {"both", "image"}:
             _maybe_warmup(ds.image_paths, "image")
             v0 = time.time()
-            img = run_embedding(
-                model_id=model_id,
-                backend_name=args.backend,
+            img = embed_with_session(
+                session,
                 inputs=ds.image_paths,
                 modality="image",
-                device=args.device,
-                base_url=base_url,
-                api=args.api,
-                api_key=args.api_key,
-                timeout=args.timeout,
-                image_transport=args.image_transport,
                 batch_size=args.batch_size,
                 max_length=args.max_length,
                 normalize=args.normalize,
-                encoding_format=args.encoding_format,
-                use_amx=args.use_amx,
-                dtype=args.dtype,
-                **backend_kwargs,
             )
             v1 = time.time()
             elapsed = v1 - v0
@@ -298,24 +288,13 @@ def main(argv: Any = None) -> None:
     _maybe_warmup(inputs, modality)
 
     t0 = time.time()
-    result = run_embedding(
-        model_id=model_id,
-        backend_name=args.backend,
+    result = embed_with_session(
+        session,
         inputs=inputs,
         modality=modality,
-        device=args.device,
-        base_url=base_url,
-        api=args.api,
-        api_key=args.api_key,
-        timeout=args.timeout,
-        image_transport=args.image_transport,
         batch_size=args.batch_size,
         max_length=args.max_length,
         normalize=args.normalize,
-        encoding_format=args.encoding_format,
-        use_amx=args.use_amx,
-        dtype=args.dtype,
-        **backend_kwargs,
     )
     t1 = time.time()
 
