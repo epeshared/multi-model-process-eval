@@ -655,6 +655,9 @@ def _run_backend_sglang_offline(
     normalize: bool,
     kwargs: dict,
 ) -> torch.Tensor:
+    dev = (device or kwargs.get("device", "cuda") or "cuda").lower()
+    default_enable_torch_compile = not dev.startswith("cpu")
+    default_torch_compile_max_bs = 32 if default_enable_torch_compile else 1
     _log_backend_call(
         "sglang-offline",
         model_id=model_id,
@@ -666,8 +669,8 @@ def _run_backend_sglang_offline(
         quantization=kwargs.get("quantization"),
         revision=kwargs.get("revision"),
         attention_backend=kwargs.get("attention_backend"),
-        enable_torch_compile=kwargs.get("enable_torch_compile", True),
-        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", 32),
+        enable_torch_compile=kwargs.get("enable_torch_compile", default_enable_torch_compile),
+        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", default_torch_compile_max_bs),
         batch_size=batch_size,
         normalize=normalize,
         mode=mode,
@@ -685,8 +688,8 @@ def _run_backend_sglang_offline(
         revision=kwargs.get("revision"),
         attention_backend=kwargs.get("attention_backend"),
         is_embedding=True,
-        enable_torch_compile=kwargs.get("enable_torch_compile", True),
-        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", 32),
+        enable_torch_compile=kwargs.get("enable_torch_compile", default_enable_torch_compile),
+        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", default_torch_compile_max_bs),
         **_filtered_sglang_offline_kwargs(kwargs),
     )
     if mode == "image":

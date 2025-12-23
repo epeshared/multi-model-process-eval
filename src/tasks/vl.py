@@ -94,6 +94,12 @@ def load_vl_session(
 
         if print_model_info:
             print(f"[vl.load] backend=sglang-offline model_id={model_id} device={device or 'cuda'} dtype={dtype or 'auto'}")
+
+        dev = (device or "cuda").lower()
+        # torch.compile graph capture can be extremely memory-hungry on CPU and
+        # may get the scheduler process killed (exit -9). Default to off on CPU.
+        default_enable_torch_compile = not dev.startswith("cpu")
+        default_torch_compile_max_bs = 32 if default_enable_torch_compile else 1
         return SGLangOfflineVLClient(
             model=model_id,
             dtype=(dtype or "auto"),
@@ -104,8 +110,8 @@ def load_vl_session(
             quantization=kwargs.pop("quantization", None),
             revision=kwargs.pop("revision", None),
             attention_backend=kwargs.pop("attention_backend", None),
-            enable_torch_compile=bool(kwargs.pop("enable_torch_compile", True)),
-            torch_compile_max_bs=int(kwargs.pop("torch_compile_max_bs", 32)),
+            enable_torch_compile=bool(kwargs.pop("enable_torch_compile", default_enable_torch_compile)),
+            torch_compile_max_bs=int(kwargs.pop("torch_compile_max_bs", default_torch_compile_max_bs)),
             **kwargs,
         )
 

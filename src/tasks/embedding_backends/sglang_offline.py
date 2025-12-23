@@ -64,11 +64,18 @@ class SGLangOfflineEmbeddingClient:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         attention_backend: Optional[str] = None,
+        disable_overlap_schedule: bool = True,
+        skip_server_warmup: bool = True,
+        enable_tokenizer_batch_encode: bool = True,
         is_embedding: bool = True,
         enable_torch_compile: bool = True,
         torch_compile_max_bs: int = 32,
         **engine_extra_kwargs: Dict[str, Any],
     ) -> None:
+        dev = (device or "").lower()
+        if attention_backend is None and dev.startswith("cpu"):
+            attention_backend = "intel_amx"
+
         server_args = ServerArgs(
             model_path=model,
             dtype=dtype,
@@ -80,9 +87,12 @@ class SGLangOfflineEmbeddingClient:
             quantization=quantization,
             revision=revision,
             is_embedding=is_embedding,
+            disable_overlap_schedule=disable_overlap_schedule,
+            skip_server_warmup=skip_server_warmup,
             enable_torch_compile=enable_torch_compile,
             torch_compile_max_bs=torch_compile_max_bs,
             attention_backend=attention_backend,
+            enable_tokenizer_batch_encode=enable_tokenizer_batch_encode,
             log_level="error",
             **engine_extra_kwargs,
         )

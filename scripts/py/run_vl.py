@@ -64,6 +64,12 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
 
     # generation/runtime
     p.add_argument("--max-new-tokens", type=int, default=128)
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        help="Number of warmup calls to run after loading the session (excluded from timing)",
+    )
     p.add_argument("--device", help="Device id, e.g., cuda:0")
     p.add_argument("--dtype", help="auto|fp16|bf16|fp32")
     p.add_argument(
@@ -151,9 +157,27 @@ def main(argv: Any = None) -> None:
         **backend_kwargs,
     )
 
+    warmup = max(0, int(getattr(args, "warmup", 0) or 0))
+
     if args.dataset == "single":
         if not args.image:
             raise ValueError("--image is required when --dataset=single")
+
+        if warmup > 0:
+            print(
+                f"[vl.warmup] start dataset=single warmup={warmup} image={args.image}",
+                flush=True,
+            )
+            for _ in range(warmup):
+                _ = chat_with_session(
+                    session,
+                    image_paths=args.image,
+                    prompt=args.prompt,
+                    max_new_tokens=args.max_new_tokens,
+                )
+            print("[vl.warmup] done", flush=True)
+
+        print("[vl.run] start dataset=single", flush=True)
         out = chat_with_session(
             session,
             image_paths=args.image,
@@ -180,7 +204,24 @@ def main(argv: Any = None) -> None:
 
         bs = max(1, int(args.batch_size))
         n = len(ds.image_paths)
+
+        if warmup > 0 and n > 0:
+            warm_paths = ds.image_paths[: min(bs, n)]
+            print(
+                f"[vl.warmup] start dataset=flickr8k warmup={warmup} warmup_batch={len(warm_paths)} batch_size={bs}",
+                flush=True,
+            )
+            for _ in range(warmup):
+                _ = chat_with_session(
+                    session,
+                    image_paths=warm_paths,
+                    prompt=args.prompt,
+                    max_new_tokens=args.max_new_tokens,
+                )
+            print("[vl.warmup] done", flush=True)
+
         # Timing excludes model/client load; session was created above.
+        print(f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs}", flush=True)
         t0 = time.time()
 
         rows: List[Dict[str, Any]] = []

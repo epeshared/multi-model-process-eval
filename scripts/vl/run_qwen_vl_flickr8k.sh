@@ -16,6 +16,7 @@ set -euo pipefail
 #   DTYPE
 #   USE_AMX (true/1/yes/on to enable; torch+cpu only)
 #   PRINT_MODEL_INFO (true/1/yes/on to enable; prints model/client info at load)
+#   WARMUP (int; number of warmup calls after loading session; excluded from timing)
 #
 # HTTP backends:
 #   BASE_URL (for BACKEND=sglang or BACKEND=vllm-http)
@@ -59,6 +60,7 @@ DEVICE=${DEVICE:-cpu}
 DTYPE=${DTYPE:-auto}
 USE_AMX=${USE_AMX:-0}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
+WARMUP=${WARMUP:-0}
 
 # SGLang VL HTTP backend requires a CUDA-capable server for multimodal models.
 # If you want CPU inference, use BACKEND=torch.
@@ -96,6 +98,51 @@ case "${PRINT_MODEL_INFO}" in
     ;;
 esac
 
+# Align env vars with scripts/embedding/sglang/start_sglang_server.sh when using sglang-offline.
+if [[ "${BACKEND}" == "sglang-offline" || "${BACKEND}" == "sglang_offline" ]]; then
+  export DNNL_MAX_CPU_ISA="${DNNL_MAX_CPU_ISA:-AVX512_CORE_AMX}"
+  export DNNL_VERBOSE="${DNNL_VERBOSE:-0}"
+  export IPEX_DISABLE_AUTOCAST="${IPEX_DISABLE_AUTOCAST:-1}"
+
+  export SGLANG_USE_CPU_ENGINE="${SGLANG_USE_CPU_ENGINE:-1}"
+  export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-1}"
+
+  # Prefer the active conda env, but fall back to the known env path.
+  export CONDA_PREFIX="${CONDA_PREFIX:-/root/miniforge3/envs/xtang-embedding-cpu}"
+
+  # Profiler/log dir.
+  _SGLANG_LOG_DIR="${ROOT_DIR}/scripts/vl/sglang/sglang_logs/sglang_cpu"
+  mkdir -p "${_SGLANG_LOG_DIR}"
+  export SGLANG_TORCH_PROFILER_DIR="${SGLANG_TORCH_PROFILER_DIR:-${_SGLANG_LOG_DIR}}"
+
+  # Safe LD_PRELOAD join (only add libs that exist; don't clobber existing preload).
+  _existing_preload="${LD_PRELOAD:-}"
+  _preload_join=""
+  _libs=(
+    "${CONDA_PREFIX}/lib/libiomp5.so"
+    "${CONDA_PREFIX}/lib/libtcmalloc.so"
+    "${CONDA_PREFIX}/lib/libtbbmalloc.so.2"
+  )
+  for f in "${_libs[@]}"; do
+    [[ -f "${f}" ]] && _preload_join="${_preload_join:+${_preload_join}:}${f}"
+  done
+  if [[ -n "${_preload_join}" ]]; then
+    if [[ -n "${_existing_preload}" ]]; then
+      export LD_PRELOAD="${_preload_join}:${_existing_preload}"
+    else
+      export LD_PRELOAD="${_preload_join}"
+    fi
+  fi
+fi
+
+# If user already passed --warmup via EXTRA_ARGS, don't add another one.
+WARMUP_ARG=()
+if [[ "${WARMUP}" != "" && "${WARMUP}" != "0" ]]; then
+  if [[ " $* " != *" --warmup "* ]]; then
+    WARMUP_ARG=(--warmup "${WARMUP}")
+  fi
+fi
+
 cd "${ROOT_DIR}"
 
 echo "[run_qwen_vl_flickr8k] MODEL=${MODEL}"
@@ -117,6 +164,7 @@ echo "[run_qwen_vl_flickr8k] DEVICE=${DEVICE}"
 echo "[run_qwen_vl_flickr8k] DTYPE=${DTYPE}"
 echo "[run_qwen_vl_flickr8k] USE_AMX=${USE_AMX}"
 echo "[run_qwen_vl_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
+echo "[run_qwen_vl_flickr8k] WARMUP=${WARMUP}"
 if [[ $# -gt 0 ]]; then
   printf '[run_qwen_vl_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
 else
@@ -134,6 +182,7 @@ python scripts/py/run_vl.py \
   --max-samples "${MAX_SAMPLES}" \
   --batch-size "${BATCH_SIZE}" \
   --prompt "${PROMPT}" \
+  "${WARMUP_ARG[@]}" \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \
   ${BASE_URL:+--base-url "${BASE_URL}"} \

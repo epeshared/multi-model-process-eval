@@ -30,10 +30,17 @@ class SGLangOfflineVLClient:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         attention_backend: Optional[str] = None,
+        disable_overlap_schedule: bool = True,
+        skip_server_warmup: bool = True,
+        enable_multimodal: Optional[bool] = True,
         enable_torch_compile: bool = True,
         torch_compile_max_bs: int = 32,
         **engine_extra_kwargs: Dict[str, Any],
     ) -> None:
+        dev = (device or "").lower()
+        if attention_backend is None and dev.startswith("cpu"):
+            attention_backend = "intel_amx"
+
         server_args = ServerArgs(
             model_path=model,
             dtype=dtype,
@@ -45,6 +52,9 @@ class SGLangOfflineVLClient:
             quantization=quantization,
             revision=revision,
             is_embedding=False,
+            enable_multimodal=enable_multimodal,
+            disable_overlap_schedule=disable_overlap_schedule,
+            skip_server_warmup=skip_server_warmup,
             enable_torch_compile=enable_torch_compile,
             torch_compile_max_bs=torch_compile_max_bs,
             attention_backend=attention_backend,
@@ -82,6 +92,22 @@ class SGLangOfflineVLClient:
                     return [ret[k]]
         return [str(ret)]
 
+    def _call_with_max_tokens(self, fn: Any, *, max_new_tokens: int, **call_kwargs: Any) -> Any:
+        # sglang Engine APIs differ across versions:
+        # - some accept `max_new_tokens`
+        # - others accept `max_tokens`
+        # - some rely on internal defaults if neither is provided
+        call_kwargs.pop("max_new_tokens", None)
+        call_kwargs.pop("max_tokens", None)
+
+        try:
+            return fn(max_new_tokens=int(max_new_tokens), **call_kwargs)
+        except TypeError:
+            try:
+                return fn(max_tokens=int(max_new_tokens), **call_kwargs)
+            except TypeError:
+                return fn(**call_kwargs)
+
     def chat(
         self,
         *,
@@ -98,7 +124,8 @@ class SGLangOfflineVLClient:
 
         # Try common APIs across sglang versions.
         if hasattr(self.engine, "chat"):
-            ret = self.engine.chat(
+            ret = self._call_with_max_tokens(
+                self.engine.chat,
                 prompt=list(prompts),
                 image_data=image_data,
                 max_new_tokens=int(max_new_tokens),
@@ -108,7 +135,8 @@ class SGLangOfflineVLClient:
             return texts if len(texts) == len(prompts) else (texts + [""] * (len(prompts) - len(texts)))
 
         if hasattr(self.engine, "generate"):
-            ret = self.engine.generate(
+            ret = self._call_with_max_tokens(
+                self.engine.generate,
                 prompt=list(prompts),
                 image_data=image_data,
                 max_new_tokens=int(max_new_tokens),
