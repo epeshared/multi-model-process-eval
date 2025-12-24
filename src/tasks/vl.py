@@ -178,9 +178,7 @@ def chat_with_session(
     if not hasattr(session, "chat"):
         raise ValueError(f"Session does not have chat(): {type(session)}")
 
-    # -----------------------------
-    # ✅ 方案A：只认 tag=sglang-http
-    # -----------------------------
+
     is_sglang_http = getattr(session, "_backend_tag", "") == "sglang-http"
 
     # profile only applies to sglang-http
