@@ -88,6 +88,7 @@ python -m sglang.launch_server \
   --enable-torch-compile \
   --torch-compile-max-bs "$BATCH_SIZE" \
   --attention-backend intel_amx \
+  --disable-fast-image-processor \
   --enable-tokenizer-batch-encode \
   --log-level error
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence
 import base64
 import mimetypes
 import os
@@ -27,6 +27,12 @@ def _maybe_add_v1(base_url: str) -> str:
     if b.endswith("/v1"):
         return b
     return b + "/v1"
+
+
+def _join_url(base: str, path: str) -> str:
+    b = (base or "").rstrip("/")
+    p = (path or "").lstrip("/")
+    return f"{b}/{p}" if p else b
 
 
 def _guess_mime(path: str) -> str:
@@ -85,7 +91,6 @@ def _extract_chat_text(resp: Dict[str, Any]) -> str:
             if isinstance(content, str):
                 return content
             if isinstance(content, list):
-                # Some servers return a list of content blocks; concatenate text parts.
                 parts: List[str] = []
                 for item in content:
                     if isinstance(item, dict) and item.get("type") in {"text", "output_text"}:
@@ -104,7 +109,14 @@ def _extract_chat_text(resp: Dict[str, Any]) -> str:
 class SGLangHTTPVLClient:
     """OpenAI-compatible VL chat client for SGLang servers.
 
-    Uses POST {base_url}/v1/chat/completions.
+    Chat uses POST {base_url}/v1/chat/completions.
+
+    NOTE: SGLang's profiling endpoints are typically exposed at root:
+      - POST {base_url}/start_profile
+      - POST {base_url}/stop_profile
+    and NOT under /v1. This client supports both by keeping two base URLs:
+      - base_url_root: http://host:port
+      - base_url_v1:   http://host:port/v1
     """
 
     def __init__(
@@ -120,7 +132,11 @@ class SGLangHTTPVLClient:
     ) -> None:
         if not _REQUESTS_OK:
             raise RuntimeError("requests is required for the sglang HTTP VL backend")
-        self.base_url = _maybe_add_v1(base_url)
+
+        # keep both root and /v1 endpoints
+        self.base_url_root = _norm_base_url(base_url)   # http://host:port
+        self.base_url_v1 = _maybe_add_v1(base_url)      # http://host:port/v1
+
         self.model = model
         self.api_key = api_key or ""
         self.timeout = float(timeout)
@@ -137,8 +153,39 @@ class SGLangHTTPVLClient:
         h.update(self.extra_headers)
         return h
 
+    def _post_json_any(self, *, base: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST json and accept either json or text response."""
+        url = _join_url(base, path)
+        resp = self.session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+
+        # Some SGLang control endpoints return plain text.
+        try:
+            data = resp.json()
+            return data if isinstance(data, dict) else {"data": data}
+        except Exception:
+            return {"text": (resp.text or "").strip()}
+
+    # --- profiling controls (root endpoints) ---
+    def start_profile(self, **kwargs: Any) -> Dict[str, Any]:
+        # allow override endpoints; default to root endpoints
+        start_path = str(kwargs.pop("start_path", "/start_profile"))
+        payload: Dict[str, Any] = dict(kwargs)
+
+        # keep "model" for compatibility (harmless if server ignores it)
+        payload.setdefault("model", self.model or "default")
+
+        return self._post_json_any(base=self.base_url_root, path=start_path, payload=payload)
+
+    def stop_profile(self, **kwargs: Any) -> Dict[str, Any]:
+        stop_path = str(kwargs.pop("stop_path", "/stop_profile"))
+        payload: Dict[str, Any] = dict(kwargs)
+        payload.setdefault("model", self.model or "default")
+        return self._post_json_any(base=self.base_url_root, path=stop_path, payload=payload)
+
+    # --- chat (v1 endpoint) ---
     def _post_chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}/chat/completions"
+        url = _join_url(self.base_url_v1, "/chat/completions")
         last_err: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -146,7 +193,6 @@ class SGLangHTTPVLClient:
                 try:
                     resp.raise_for_status()
                 except Exception as e:
-                    # Surface server details; SGLang often returns useful JSON/text error payloads.
                     status = getattr(resp, "status_code", None)
                     body = ""
                     try:
@@ -156,9 +202,8 @@ class SGLangHTTPVLClient:
                     body = body.strip()
                     if len(body) > 2000:
                         body = body[:2000] + "...<truncated>"
-                    raise RuntimeError(
-                        f"HTTP {status} for {url} (model={self.model}): {body or '<no body>'}"
-                    ) from e
+                    raise RuntimeError(f"HTTP {status} for {url} (model={self.model}): {body or '<no body>'}") from e
+
                 data = resp.json()
                 if not isinstance(data, dict):
                     raise RuntimeError(f"Unexpected response type: {type(data)}")

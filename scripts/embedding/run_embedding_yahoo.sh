@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run embeddings on the yahoo_answers JSONL dataset using the Python entrypoint under scripts/py.
+# Run embeddings on the yahoo_answers JSONL dataset using scripts/py/run_embedding.py.
+#
 # Environment overrides:
 #   MODEL (default: qwen3-embedding-4b)
 #   MODEL_ID (default: empty, uses preset mapping in run_embedding.py)
-#   BACKEND (default: torch)
+#   BACKEND (default: sglang-offline)
 #   YAHOO_MODE (default: q)  # q | a | q+a
-#   PRINT_MODEL_INFO (true/1/yes/on to enable; prints model/client info at load)
+#   PRINT_MODEL_INFO (true/1/yes/on to enable)
+#
+# Profiling (new):
+#   PROFILE (true/1/yes/on)                    # enables --profile
+#   PROFILE_RECORD_SHAPES (true/1/yes/on)      # enables --profile-record-shapes
+#   PROFILE_ACTIVITIES (default: CPU,CUDA)     # e.g. CPU,CUDA
+#   PROFILE_OUT_DIR                            # --profile-out-dir
+#   PROFILE_OUT_NAME (default: embedding_profile)
+#   PROFILE_STRICT (true/1/yes/on)             # --profile-strict
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -28,8 +37,6 @@ if [[ -z "${DATASET_PATH}" ]]; then
   exit 1
 fi
 
-
-
 BACKEND=${BACKEND:-sglang-offline}
 YAHOO_MODE=${YAHOO_MODE:-q}
 MAX_SAMPLES=${MAX_SAMPLES:-1000}
@@ -40,6 +47,15 @@ USE_AMX=${USE_AMX:-TRUE}
 BASE_URL=${BASE_URL:-http://127.0.0.1:30000}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
+
+# Profiling envs (new)
+PROFILE=${PROFILE:-0}
+PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES:-0}
+PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES:-CPU,CUDA}
+PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-}
+PROFILE_OUT_NAME=${PROFILE_OUT_NAME:-embedding_profile}
+PROFILE_STRICT=${PROFILE_STRICT:-0}
+
 MODEL_ID_ARG=()
 if [[ -n "${MODEL_ID:-}" ]]; then
   MODEL_ID_ARG=(--model-id "${MODEL_ID}")
@@ -64,7 +80,53 @@ case "${PRINT_MODEL_INFO}" in
     ;;
 esac
 
+# -------------------------
+# Profiling args (new)
+# - If user already passed the flag in EXTRA_ARGS, don't add duplicates.
+# -------------------------
+PROFILE_ARGS=()
 
+case "${PROFILE}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile "* ]]; then
+      PROFILE_ARGS+=(--profile)
+    fi
+    ;;
+esac
+
+case "${PROFILE_RECORD_SHAPES}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile-record-shapes "* ]]; then
+      PROFILE_ARGS+=(--profile-record-shapes)
+    fi
+    ;;
+esac
+
+if [[ -n "${PROFILE_ACTIVITIES}" ]]; then
+  if [[ " $* " != *" --profile-activities "* ]]; then
+    PROFILE_ARGS+=(--profile-activities "${PROFILE_ACTIVITIES}")
+  fi
+fi
+
+if [[ -n "${PROFILE_OUT_DIR}" ]]; then
+  if [[ " $* " != *" --profile-out-dir "* ]]; then
+    PROFILE_ARGS+=(--profile-out-dir "${PROFILE_OUT_DIR}")
+  fi
+fi
+
+if [[ -n "${PROFILE_OUT_NAME}" ]]; then
+  if [[ " $* " != *" --profile-out-name "* ]]; then
+    PROFILE_ARGS+=(--profile-out-name "${PROFILE_OUT_NAME}")
+  fi
+fi
+
+case "${PROFILE_STRICT}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile-strict "* ]]; then
+      PROFILE_ARGS+=(--profile-strict)
+    fi
+    ;;
+esac
 
 cd "${ROOT_DIR}"
 
@@ -80,6 +142,12 @@ echo "[run_embedding_yahoo] USE_AMX=${USE_AMX}"
 echo "[run_embedding_yahoo] BASE_URL=${BASE_URL:-<unset>}"
 echo "[run_embedding_yahoo] WARMUP_SAMPLES=${WARMUP_SAMPLES}"
 echo "[run_embedding_yahoo] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
+echo "[run_embedding_yahoo] PROFILE=${PROFILE}"
+echo "[run_embedding_yahoo] PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES}"
+echo "[run_embedding_yahoo] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
+echo "[run_embedding_yahoo] PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-<unset>}"
+echo "[run_embedding_yahoo] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
+echo "[run_embedding_yahoo] PROFILE_STRICT=${PROFILE_STRICT}"
 echo "[run_embedding_yahoo] DATASET_PATH=${DATASET_PATH}"
 if [[ $# -gt 0 ]]; then
   printf '[run_embedding_yahoo] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
@@ -99,6 +167,7 @@ python scripts/py/run_embedding.py \
   "${USE_AMX_ARG[@]}" \
   "${WARMUP_ARG[@]}" \
   "${PRINT_MODEL_INFO_ARG[@]}" \
+  "${PROFILE_ARGS[@]}" \
   ${BASE_URL:+--base-url "${BASE_URL}"} \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Run embeddings on Flickr8k (images + captions) via scripts/py/run_embedding.py.
 #
-# Environment overrides (aligned with embedding_eval/scripts/bench_flickr8k_sglang.sh style):
+# Environment overrides:
 #   MODEL (default: clip-vit-base-patch32)
 #   MODEL_ID (default: /home/xtang/models/openai/clip-vit-base-patch32)
 #   BACKEND (default: torch)                   # torch|sglang|sglang-offline|vllm|vllm-http
@@ -25,7 +25,15 @@ set -euo pipefail
 #   DTYPE
 #   WARMUP_SAMPLES (if >1, do warmup)
 #   USE_AMX (true/1/yes/on to enable; torch+cpu only)
-#   PRINT_MODEL_INFO (true/1/yes/on to enable; prints model/client info at load)
+#   PRINT_MODEL_INFO (true/1/yes/on to enable)
+#
+# Profiling (new):
+#   PROFILE (true/1/yes/on)                    # enables --profile
+#   PROFILE_RECORD_SHAPES (true/1/yes/on)      # enables --profile-record-shapes
+#   PROFILE_ACTIVITIES (default: CPU,CUDA)     # e.g. CPU,CUDA
+#   PROFILE_OUT_DIR                            # --profile-out-dir
+#   PROFILE_OUT_NAME (default: embedding_profile)
+#   PROFILE_STRICT (true/1/yes/on)             # --profile-strict
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -50,6 +58,14 @@ DTYPE=${DTYPE:-bfloat16}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1000}
 USE_AMX=${USE_AMX:-0}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
+
+# Profiling envs
+PROFILE=${PROFILE:-0}
+PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES:-0}
+PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES:-CPU,CUDA}
+PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-}
+PROFILE_OUT_NAME=${PROFILE_OUT_NAME:-embedding_profile}
+PROFILE_STRICT=${PROFILE_STRICT:-0}
 
 # Optional positional overrides:
 #   $1 -> captions file (Flickr8k.token.txt)
@@ -88,6 +104,12 @@ echo "[run_embedding_flickr8k] DTYPE=${DTYPE:-<unset>}"
 echo "[run_embedding_flickr8k] WARMUP_SAMPLES=${WARMUP_SAMPLES}"
 echo "[run_embedding_flickr8k] USE_AMX=${USE_AMX}"
 echo "[run_embedding_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
+echo "[run_embedding_flickr8k] PROFILE=${PROFILE}"
+echo "[run_embedding_flickr8k] PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES}"
+echo "[run_embedding_flickr8k] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
+echo "[run_embedding_flickr8k] PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-<unset>}"
+echo "[run_embedding_flickr8k] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
+echo "[run_embedding_flickr8k] PROFILE_STRICT=${PROFILE_STRICT}"
 if [[ $# -gt 0 ]]; then
   printf '[run_embedding_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
 else
@@ -113,6 +135,54 @@ case "${PRINT_MODEL_INFO}" in
     ;;
 esac
 
+# -------------------------
+# Profiling args (new)
+# - If user already passed the flag in EXTRA_ARGS, don't add duplicates.
+# -------------------------
+PROFILE_ARGS=()
+
+case "${PROFILE}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile "* ]]; then
+      PROFILE_ARGS+=(--profile)
+    fi
+    ;;
+esac
+
+case "${PROFILE_RECORD_SHAPES}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile-record-shapes "* ]]; then
+      PROFILE_ARGS+=(--profile-record-shapes)
+    fi
+    ;;
+esac
+
+if [[ -n "${PROFILE_ACTIVITIES}" ]]; then
+  if [[ " $* " != *" --profile-activities "* ]]; then
+    PROFILE_ARGS+=(--profile-activities "${PROFILE_ACTIVITIES}")
+  fi
+fi
+
+if [[ -n "${PROFILE_OUT_DIR}" ]]; then
+  if [[ " $* " != *" --profile-out-dir "* ]]; then
+    PROFILE_ARGS+=(--profile-out-dir "${PROFILE_OUT_DIR}")
+  fi
+fi
+
+if [[ -n "${PROFILE_OUT_NAME}" ]]; then
+  if [[ " $* " != *" --profile-out-name "* ]]; then
+    PROFILE_ARGS+=(--profile-out-name "${PROFILE_OUT_NAME}")
+  fi
+fi
+
+case "${PROFILE_STRICT}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [[ " $* " != *" --profile-strict "* ]]; then
+      PROFILE_ARGS+=(--profile-strict)
+    fi
+    ;;
+esac
+
 python scripts/py/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
@@ -128,6 +198,7 @@ python scripts/py/run_embedding.py \
   --warmup-samples "${WARMUP_SAMPLES}" \
   "${USE_AMX_ARG[@]}" \
   "${PRINT_MODEL_INFO_ARG[@]}" \
+  "${PROFILE_ARGS[@]}" \
   ${BASE_URL:+--base-url "${BASE_URL}"} \
   --api "${API}" \
   --api-key "${API_KEY}" \

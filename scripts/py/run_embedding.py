@@ -8,7 +8,7 @@ import os
 import sys
 import time
 import math
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 # If output is piped to a command like `head`, stdout may be closed early.
 # Default Python behavior can emit noisy BrokenPipeError messages on exit.
@@ -47,7 +47,6 @@ DATASET_LOADERS: Dict[str, Dict[str, Any]] = {
 def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
     if dataset == "yahoo_answers":
         from src.data import load_yahoo_answers_jsonl
-
         return load_yahoo_answers_jsonl, "text"
     raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -63,12 +62,22 @@ def _norm_base_url(base_url: str | None) -> str | None:
 def _shape_list(x: Any) -> List[int] | None:
     try:
         import torch
-
         if isinstance(x, torch.Tensor):
             return list(x.shape)
     except Exception:
         pass
     return None
+
+
+def _parse_activities(s: Optional[str]) -> List[str]:
+    """
+    Parse activities string like "CPU,CUDA" into ["CPU","CUDA"].
+    Keep it as strings here; downstream clients decide how to map.
+    """
+    if not s:
+        return []
+    parts = [p.strip() for p in str(s).split(",")]
+    return [p for p in parts if p]
 
 
 def parse_args(argv: Any = None) -> argparse.Namespace:
@@ -99,6 +108,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default="both",
         help="Flickr8k embedding modality: both|text|image (default both)",
     )
+
     parser.add_argument("--device", help="Device id, e.g., cuda:0")
     parser.add_argument("--base-url", help="SGLang server base URL (for backend=sglang)")
     parser.add_argument("--api", default="v1", help="SGLang API mode: native|v1|openai")
@@ -109,10 +119,12 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default="data-url",
         help="Image transport for SGLang HTTP embedding: data-url|base64|path/url",
     )
+
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size for embedding")
     parser.add_argument("--max-length", type=int, default=512, help="Max token length for torch backend")
     parser.add_argument("--normalize", action="store_true", default=True, help="Whether to L2 normalize outputs")
     parser.add_argument("--no-normalize", dest="normalize", action="store_false")
+
     parser.add_argument(
         "--use-amx",
         action="store_true",
@@ -125,6 +137,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default=False,
         help="Print backend/model info during session load",
     )
+
     parser.add_argument("--encoding-format", help="Encoding format for vLLM HTTP (e.g., bf16)")
     parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size for vLLM offline")
     parser.add_argument("--max-model-len", type=int, default=8192, help="Max model length for vLLM offline")
@@ -137,6 +150,44 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default=1,
         help="If >1, run a warmup embedding call on the first N samples before benchmarking",
     )
+
+    # -------------------------
+    # Profiling (new)
+    # -------------------------
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable backend profiling (sglang-http: start/stop server profile; sglang-offline: torch.profiler; others: no-op)",
+    )
+    parser.add_argument(
+        "--profile-record-shapes",
+        action="store_true",
+        default=False,
+        help="Record shapes in profiler (where supported)",
+    )
+    parser.add_argument(
+        "--profile-activities",
+        default="CPU,CUDA",
+        help="Comma-separated activities for profiler, e.g. CPU,CUDA",
+    )
+    parser.add_argument(
+        "--profile-out-dir",
+        default="",
+        help="Output dir for offline profiler traces (where supported)",
+    )
+    parser.add_argument(
+        "--profile-out-name",
+        default="embedding_profile",
+        help="Base name/prefix for profile outputs (where supported)",
+    )
+    parser.add_argument(
+        "--profile-strict",
+        action="store_true",
+        default=False,
+        help="If true, fail fast when start/stop profile is unsupported or errors",
+    )
+
     return parser.parse_args(argv)
 
 
@@ -179,6 +230,18 @@ def main(argv: Any = None) -> None:
         **backend_kwargs,
     )
 
+    # Build profile kwargs to pass down.
+    profile_enabled = bool(getattr(args, "profile", False))
+    profile_kwargs: Dict[str, Any] = {
+        "record_shapes": bool(getattr(args, "profile_record_shapes", False)),
+        "activities": _parse_activities(getattr(args, "profile_activities", "CPU,CUDA")),
+        "out_dir": str(getattr(args, "profile_out_dir", "") or ""),
+        "out_name": str(getattr(args, "profile_out_name", "embedding_profile") or "embedding_profile"),
+        "strict": bool(getattr(args, "profile_strict", False)),
+        # Helpful metadata for filenames / traces (optional, your backend may ignore)
+        "tag": f"embed_{args.dataset}_{args.backend}",
+    }
+
     def _maybe_warmup(inputs: List[Any], modality: str) -> None:
         if int(args.warmup_samples) <= 1:
             return
@@ -194,6 +257,8 @@ def main(argv: Any = None) -> None:
             batch_size=min(args.batch_size, max(1, len(warmup_inputs))),
             max_length=args.max_length,
             normalize=args.normalize,
+            # warmup 默认不启 profile（避免污染正式 trace）
+            profile=False,
         )
 
     if args.dataset == "flickr8k":
@@ -217,6 +282,9 @@ def main(argv: Any = None) -> None:
             "captions_per_image": ds.captions_per_image,
             "batch_size": args.batch_size,
             "warmup_samples": int(args.warmup_samples),
+            "profile": profile_enabled,
+            "profile_kwargs": {k: v for k, v in profile_kwargs.items() if k != "activities"},
+            "profile_activities": profile_kwargs.get("activities"),
         }
 
         if flickr_modality in {"both", "text"}:
@@ -229,6 +297,8 @@ def main(argv: Any = None) -> None:
                 batch_size=args.batch_size,
                 max_length=args.max_length,
                 normalize=args.normalize,
+                profile=profile_enabled,
+                profile_kwargs=profile_kwargs,
             )
             t1 = time.time()
             elapsed = t1 - t0
@@ -255,6 +325,8 @@ def main(argv: Any = None) -> None:
                 batch_size=args.batch_size,
                 max_length=args.max_length,
                 normalize=args.normalize,
+                profile=profile_enabled,
+                profile_kwargs=profile_kwargs,
             )
             v1 = time.time()
             elapsed = v1 - v0
@@ -295,6 +367,8 @@ def main(argv: Any = None) -> None:
         batch_size=args.batch_size,
         max_length=args.max_length,
         normalize=args.normalize,
+        profile=profile_enabled,
+        profile_kwargs=profile_kwargs,
     )
     t1 = time.time()
 
@@ -306,7 +380,7 @@ def main(argv: Any = None) -> None:
     num_batches = int(math.ceil(count / bs)) if count > 0 else 0
     avg_batch_time_sec = (elapsed / num_batches) if num_batches > 0 else 0.0
 
-    summary = {
+    summary: Dict[str, Any] = {
         "count": count,
         "time_sec": elapsed,
         "tps": tps,
@@ -314,11 +388,16 @@ def main(argv: Any = None) -> None:
         "num_batches": num_batches,
         "avg_batch_time_sec": avg_batch_time_sec,
         "shape": _shape_list(result),
+        "profile": profile_enabled,
+        "profile_kwargs": {k: v for k, v in profile_kwargs.items() if k != "activities"},
+        "profile_activities": profile_kwargs.get("activities"),
+        "model_id": model_id,
+        "backend": args.backend,
+        "dataset": args.dataset,
     }
 
     if args.output_path:
         import torch
-
         os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
         torch.save(result, args.output_path)
         summary["output_path"] = args.output_path

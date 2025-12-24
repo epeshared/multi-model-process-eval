@@ -1,7 +1,8 @@
+# src/tasks/embedding.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, List, Optional, Union
 
 import torch
 from transformers import AutoConfig, AutoModel, AutoTokenizer
@@ -80,7 +81,6 @@ class TorchEmbeddingSession:
                 max_length=max_length,
                 return_tensors="pt",
             )
-            # processor returns tensors and sometimes lists; move tensors
             enc = {k: v.to(self.device) for k, v in enc.items() if hasattr(v, "to")}
             feats = self.model.get_text_features(**enc)
             if normalize:
@@ -163,12 +163,6 @@ def load_embedding_session(
     dtype: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
-    """Load/init a reusable embedding session.
-
-    Intended for benchmarks where you want to exclude model/client load time.
-    Use with embed_with_session(session, ...).
-    """
-
     backend = (backend_name or "torch").lower()
 
     if backend == "torch":
@@ -180,7 +174,6 @@ def load_embedding_session(
                 from transformers import CLIPModel, CLIPProcessor
             except Exception as e:
                 raise RuntimeError(f"transformers CLIPModel/CLIPProcessor required for CLIP embeddings: {e}")
-
             processor = CLIPProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
             model = CLIPModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
             tokenizer = None
@@ -248,7 +241,6 @@ def load_embedding_session(
         )
 
     if backend in {"sglang-offline", "sglang_offline"}:
-        # Keep backward-compat: offline backends historically took dtype from kwargs.
         if dtype is not None and "dtype" not in kwargs:
             kwargs["dtype"] = dtype
         if print_model_info:
@@ -278,7 +270,9 @@ def load_embedding_session(
         if not base_url:
             raise ValueError("base_url is required for the vLLM HTTP embedding backend")
         if print_model_info:
-            print(f"[embedding.load] backend=vllm-http base_url={base_url} model_id={model_id} encoding_format={encoding_format}")
+            print(
+                f"[embedding.load] backend=vllm-http base_url={base_url} model_id={model_id} encoding_format={encoding_format}"
+            )
         return VLLMHTTPEmbeddingClient(
             base_url=base_url,
             model=model_id,
@@ -319,10 +313,15 @@ def embed_with_session(
     normalize: bool = True,
     batch_size: int = 128,
     max_length: int = 512,
+    # 方案A：profile 只在这一层对 sglang-http 生效
+    profile: bool = False,
+    profile_kwargs: Optional[dict] = None,
     **kwargs: Any,
 ) -> torch.Tensor:
     data, text_inputs, mode = _normalize_embedding_inputs(texts=texts, inputs=inputs, modality=modality)
+    profile_kwargs = dict(profile_kwargs or {})
 
+    # torch session tuple：保持稳定，不做 profile
     if isinstance(session, tuple) and len(session) == 2 and session[0] == "torch":
         torch_sess: TorchEmbeddingSession = session[1]
         _log_backend_call(
@@ -358,15 +357,55 @@ def embed_with_session(
         hidden = chunks[0].shape[-1] if chunks else 0
         return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
 
-    # Non-torch backends: expect client has encode()/encode_images().
-    if mode == "image":
-        if not hasattr(session, "encode_images"):
-            raise ValueError("This embedding backend does not support image embeddings")
-        return session.encode_images(data, batch_size=batch_size, normalize=normalize, **kwargs)
+    # ------------------------------
+    # 方案A：只对 sglang-http start/stop profile
+    # ------------------------------
+    def _is_sglang_http(obj: Any) -> bool:
+        # 首选：明确 tag
+        tag = getattr(obj, "_backend_tag", None)
+        if isinstance(tag, str) and tag.lower() == "sglang-http":
+            return True
+        # 兜底：类名/方法
+        cls = type(obj).__name__.lower()
+        if "sglang" in cls and "http" in cls:
+            return True
+        if hasattr(obj, "start_profile") and hasattr(obj, "stop_profile"):
+            return True
+        return False
 
-    if not hasattr(session, "encode"):
-        raise ValueError("This embedding backend does not support text embeddings")
-    return session.encode(text_inputs, batch_size=batch_size, normalize=normalize, **kwargs)
+    is_sglang_http = _is_sglang_http(session)
+
+    started = False
+    if profile and is_sglang_http and hasattr(session, "start_profile"):
+        session.start_profile(**profile_kwargs)
+        started = True
+
+    try:
+        if mode == "image":
+            if not hasattr(session, "encode_images"):
+                raise ValueError("This embedding backend does not support image embeddings")
+            # 注意：不要把 profile/profile_kwargs 往下传（避免重复 profile）
+            return session.encode_images(
+                data,
+                batch_size=batch_size,
+                normalize=normalize,
+                **kwargs,
+            )
+
+        if not hasattr(session, "encode"):
+            raise ValueError("This embedding backend does not support text embeddings")
+        return session.encode(
+            text_inputs,
+            batch_size=batch_size,
+            normalize=normalize,
+            **kwargs,
+        )
+    finally:
+        if started and hasattr(session, "stop_profile"):
+            try:
+                session.stop_profile(**profile_kwargs)
+            except Exception:
+                pass
 
 
 def _log_backend_call(name: str, **params: Any) -> None:
@@ -404,226 +443,6 @@ def _is_clip_model(model_id: str, trust_remote_code: bool = True) -> bool:
     return "clip" in s
 
 
-@torch.inference_mode()
-def run_embedding(
-    model_id: str,
-    texts: Optional[List[str]] = None,
-    inputs: Optional[List[Any]] = None,
-    modality: str = "text",
-    backend_name: str = "torch",
-    device: Optional[str] = None,
-    normalize: bool = True,
-    batch_size: int = 128,
-    max_length: int = 512,
-    trust_remote_code: bool = True,
-    base_url: Optional[str] = None,
-    api: str = "v1",
-    api_key: str = "",
-    timeout: float = 120.0,
-    image_transport: str = "data-url",
-    encoding_format: Optional[str] = None,
-    use_amx: bool = False,
-    dtype: Optional[str] = None,
-    **kwargs: Any,
-) -> torch.Tensor:
-    """Embedding runner across torch / sglang / vllm.
-
-    Modalities:
-    - text: supported by all backends
-    - image: supported by sglang (http/offline) and torch when using CLIP-style models
-    """
-
-    backend = (backend_name or "torch").lower()
-    mode = (modality or "text").lower()
-
-    data = inputs if inputs is not None else texts
-    if data is None:
-        raise ValueError("No inputs provided for embedding")
-
-    text_inputs: List[str]
-    if mode != "image":
-        text_inputs = [str(t) for t in data]
-    else:
-        text_inputs = []
-
-    if backend == "torch":
-        return _run_backend_torch(
-            model_id=model_id,
-            data=data,
-            text_inputs=text_inputs,
-            mode=mode,
-            device=device,
-            normalize=normalize,
-            batch_size=batch_size,
-            max_length=max_length,
-            trust_remote_code=trust_remote_code,
-            use_amx=use_amx,
-            dtype=dtype,
-        )
-
-    if backend == "sglang":
-        return _run_backend_sglang_http(
-            model_id=model_id,
-            data=data,
-            text_inputs=text_inputs,
-            mode=mode,
-            base_url=base_url,
-            api=api,
-            api_key=api_key,
-            timeout=timeout,
-            image_transport=image_transport,
-            batch_size=batch_size,
-            normalize=normalize,
-        )
-
-    if backend in {"sglang-offline", "sglang_offline"}:
-        return _run_backend_sglang_offline(
-            model_id=model_id,
-            data=data,
-            text_inputs=text_inputs,
-            mode=mode,
-            device=device,
-            batch_size=batch_size,
-            normalize=normalize,
-            kwargs=kwargs,
-        )
-
-    if backend in {"vllm-http", "vllm_openai", "vllm-http-openai"}:
-        return _run_backend_vllm_http(
-            model_id=model_id,
-            data=data,
-            text_inputs=text_inputs,
-            mode=mode,
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            encoding_format=encoding_format,
-            batch_size=batch_size,
-        )
-
-    if backend in {"vllm", "vllm-offline"}:
-        return _run_backend_vllm_offline(
-            model_id=model_id,
-            data=data,
-            text_inputs=text_inputs,
-            mode=mode,
-            device=device,
-            batch_size=batch_size,
-            kwargs=kwargs,
-        )
-
-    raise ValueError(f"Unsupported embedding backend: {backend_name}")
-
-
-def _run_backend_torch(
-    *,
-    model_id: str,
-    data: List[Any],
-    text_inputs: List[str],
-    mode: str,
-    device: Optional[str],
-    normalize: bool,
-    batch_size: int,
-    max_length: int,
-    trust_remote_code: bool,
-    use_amx: bool,
-    dtype: Optional[str],
-) -> torch.Tensor:
-    is_clip = _is_clip_model(model_id, trust_remote_code=trust_remote_code)
-    if mode != "text" and not is_clip:
-        raise ValueError("Torch backend only supports text embeddings (unless using a CLIP-style model)")
-    _log_backend_call(
-        "torch",
-        model_id=model_id,
-        device=device,
-        normalize=normalize,
-        batch_size=batch_size,
-        max_length=max_length,
-        trust_remote_code=trust_remote_code,
-        texts=text_inputs,
-        use_amx=use_amx,
-        dtype=dtype,
-        clip=is_clip,
-        modality=mode,
-    )
-    if is_clip:
-        if mode == "image":
-            return _run_torch_clip_image_embedding(
-                model_id=model_id,
-                images=list(data),
-                device=device,
-                normalize=normalize,
-                batch_size=batch_size,
-                trust_remote_code=trust_remote_code,
-                use_amx=use_amx,
-                dtype=dtype,
-            )
-        return _run_torch_clip_text_embedding(
-            model_id=model_id,
-            texts=text_inputs,
-            device=device,
-            normalize=normalize,
-            batch_size=batch_size,
-            max_length=max_length,
-            trust_remote_code=trust_remote_code,
-            use_amx=use_amx,
-            dtype=dtype,
-        )
-
-    return _run_torch_embedding(
-        model_id=model_id,
-        texts=text_inputs,
-        device=device,
-        normalize=normalize,
-        batch_size=batch_size,
-        max_length=max_length,
-        trust_remote_code=trust_remote_code,
-        use_amx=use_amx,
-        dtype=dtype,
-    )
-
-
-def _run_backend_sglang_http(
-    *,
-    model_id: str,
-    data: List[Any],
-    text_inputs: List[str],
-    mode: str,
-    base_url: Optional[str],
-    api: str,
-    api_key: str,
-    timeout: float,
-    image_transport: str,
-    batch_size: int,
-    normalize: bool,
-) -> torch.Tensor:
-    if not base_url:
-        raise ValueError("base_url is required for the sglang HTTP embedding backend")
-    _log_backend_call(
-        "sglang-http",
-        model_id=model_id,
-        base_url=base_url,
-        api=api,
-        timeout=timeout,
-        image_transport=image_transport,
-        batch_size=batch_size,
-        normalize=normalize,
-        mode=mode,
-        inputs=data,
-    )
-    client: SGLangHTTPEmbeddingClient = SGLangHTTPEmbeddingClient(
-        base_url=base_url,
-        model=model_id,
-        api=api,
-        api_key=api_key,
-        timeout=timeout,
-        image_transport=image_transport,
-    )
-    if mode == "image":
-        return client.encode_images(data, batch_size=batch_size, normalize=normalize)
-    return client.encode(text_inputs, batch_size=batch_size, normalize=normalize)
-
-
 def _filtered_sglang_offline_kwargs(kwargs: dict) -> dict:
     forbidden = {
         "dtype",
@@ -640,331 +459,11 @@ def _filtered_sglang_offline_kwargs(kwargs: dict) -> dict:
         "attention_backend",
         "enable_torch_compile",
         "torch_compile_max_bs",
+        # 防止 profile knobs 被塞进 engine kwargs
+        "profile",
+        "profile_kwargs",
     }
     return {k: v for k, v in kwargs.items() if k not in forbidden}
-
-
-def _run_backend_sglang_offline(
-    *,
-    model_id: str,
-    data: List[Any],
-    text_inputs: List[str],
-    mode: str,
-    device: Optional[str],
-    batch_size: int,
-    normalize: bool,
-    kwargs: dict,
-) -> torch.Tensor:
-    dev = (device or kwargs.get("device", "cuda") or "cuda").lower()
-    default_enable_torch_compile = not dev.startswith("cpu")
-    default_torch_compile_max_bs = 32 if default_enable_torch_compile else 1
-    _log_backend_call(
-        "sglang-offline",
-        model_id=model_id,
-        device=device or kwargs.get("device", "cuda"),
-        dtype=kwargs.get("dtype", "auto"),
-        tp_size=kwargs.get("tp_size", 1),
-        dp_size=kwargs.get("dp_size", 1),
-        random_seed=kwargs.get("random_seed", 0),
-        quantization=kwargs.get("quantization"),
-        revision=kwargs.get("revision"),
-        attention_backend=kwargs.get("attention_backend"),
-        enable_torch_compile=kwargs.get("enable_torch_compile", default_enable_torch_compile),
-        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", default_torch_compile_max_bs),
-        batch_size=batch_size,
-        normalize=normalize,
-        mode=mode,
-        inputs=data,
-    )
-    client: SGLangOfflineEmbeddingClient = SGLangOfflineEmbeddingClient(
-        model=model_id,
-        dtype=kwargs.get("dtype", "auto"),
-        device=device or kwargs.get("device", "cuda"),
-        tp_size=kwargs.get("tp_size", 1),
-        dp_size=kwargs.get("dp_size", 1),
-        random_seed=kwargs.get("random_seed", 0),
-        trust_remote_code=kwargs.get("trust_remote_code", False),
-        quantization=kwargs.get("quantization"),
-        revision=kwargs.get("revision"),
-        attention_backend=kwargs.get("attention_backend"),
-        is_embedding=True,
-        enable_torch_compile=kwargs.get("enable_torch_compile", default_enable_torch_compile),
-        torch_compile_max_bs=kwargs.get("torch_compile_max_bs", default_torch_compile_max_bs),
-        **_filtered_sglang_offline_kwargs(kwargs),
-    )
-    if mode == "image":
-        return client.encode_images(data, batch_size=batch_size, normalize=normalize)
-    return client.encode(text_inputs, batch_size=batch_size, normalize=normalize)
-
-
-def _run_backend_vllm_http(
-    *,
-    model_id: str,
-    data: List[Any],
-    text_inputs: List[str],
-    mode: str,
-    base_url: Optional[str],
-    api_key: str,
-    timeout: float,
-    encoding_format: Optional[str],
-    batch_size: int,
-) -> torch.Tensor:
-    if mode == "image":
-        raise ValueError("vLLM HTTP backend does not support image embeddings")
-    if not base_url:
-        raise ValueError("base_url is required for the vLLM HTTP embedding backend")
-    _log_backend_call(
-        "vllm-http",
-        model_id=model_id,
-        base_url=base_url,
-        timeout=timeout,
-        encoding_format=encoding_format,
-        batch_size=batch_size,
-        mode=mode,
-        inputs=data,
-    )
-    client: VLLMHTTPEmbeddingClient = VLLMHTTPEmbeddingClient(
-        base_url=base_url,
-        model=model_id,
-        api_key=api_key,
-        timeout=timeout,
-        encoding_format=encoding_format,
-    )
-    return client.encode(text_inputs, batch_size=batch_size)
-
-
-def _run_backend_vllm_offline(
-    *,
-    model_id: str,
-    data: List[Any],
-    text_inputs: List[str],
-    mode: str,
-    device: Optional[str],
-    batch_size: int,
-    kwargs: dict,
-) -> torch.Tensor:
-    if mode == "image":
-        raise ValueError("vLLM offline backend does not support image embeddings")
-    _log_backend_call(
-        "vllm-offline",
-        model_id=model_id,
-        device=device or kwargs.get("device", "cuda"),
-        dtype=kwargs.get("dtype", "auto"),
-        tensor_parallel_size=kwargs.get("tensor_parallel_size", kwargs.get("tp_size", 1)),
-        max_model_len=kwargs.get("max_model_len", 8192),
-        gpu_memory_utilization=kwargs.get("gpu_memory_utilization", 0.90),
-        batch_size=batch_size,
-        mode=mode,
-        inputs=data,
-    )
-    client: VLLMOfflineEmbeddingClient = VLLMOfflineEmbeddingClient(
-        model=model_id,
-        dtype=kwargs.get("dtype", "auto"),
-        tensor_parallel_size=kwargs.get("tensor_parallel_size", kwargs.get("tp_size", 1)),
-        device=device or kwargs.get("device", "cuda"),
-        max_model_len=kwargs.get("max_model_len", 8192),
-        gpu_memory_utilization=kwargs.get("gpu_memory_utilization", 0.90),
-    )
-    return client.encode(text_inputs, batch_size=batch_size)
-
-
-def _run_torch_embedding(
-    model_id: str,
-    texts: List[str],
-    device: Optional[str],
-    normalize: bool,
-    batch_size: int,
-    max_length: int,
-    trust_remote_code: bool,
-    use_amx: bool,
-    dtype: Optional[str],
-) -> torch.Tensor:
-    if not texts:
-        return torch.empty(0, 0)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-    model = AutoModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
-
-    target_device = torch.device(device) if device else model.device
-
-    target_dtype: Optional[torch.dtype] = None
-    if dtype:
-        dt = dtype.lower()
-        if dt in {"bf16", "bfloat16"}:
-            target_dtype = torch.bfloat16
-        elif dt in {"fp16", "float16", "half"}:
-            target_dtype = torch.float16
-        elif dt in {"fp32", "float32", "float"}:
-            target_dtype = torch.float32
-
-    if device == "cpu":
-        if use_amx:
-            if IPEX_AVAILABLE:
-                model = ipex.optimize(model, dtype=target_dtype, inplace=True)
-            model = model.to(target_dtype)
-    elif device == "cuda" and target_dtype is not None:
-        model = model.to(target_dtype)
-
-    model.to(target_device)
-
-    chunks: List[torch.Tensor] = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        encoded = tokenizer(
-            batch,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        ).to(target_device)
-        hidden_states = model(**encoded).last_hidden_state
-        pooled = _mean_pooling(hidden_states, encoded["attention_mask"])
-        if normalize:
-            pooled = _l2_normalize(pooled, dim=1)
-        chunks.append(pooled.cpu())
-
-    hidden = getattr(model.config, "hidden_size", 0)
-    return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
-
-
-def _run_torch_clip_text_embedding(
-    model_id: str,
-    texts: List[str],
-    device: Optional[str],
-    normalize: bool,
-    batch_size: int,
-    max_length: int,
-    trust_remote_code: bool,
-    use_amx: bool,
-    dtype: Optional[str],
-) -> torch.Tensor:
-    if not texts:
-        return torch.empty(0, 0)
-
-    try:
-        from transformers import CLIPModel, CLIPProcessor
-    except Exception as e:
-        raise RuntimeError(f"transformers CLIPModel/CLIPProcessor required for CLIP embeddings: {e}")
-
-    processor = CLIPProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-    model = CLIPModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
-
-    target_device = torch.device(device) if device else model.device
-
-    target_dtype: Optional[torch.dtype] = None
-    if dtype:
-        dt = dtype.lower()
-        if dt in {"bf16", "bfloat16"}:
-            target_dtype = torch.bfloat16
-        elif dt in {"fp16", "float16", "half"}:
-            target_dtype = torch.float16
-        elif dt in {"fp32", "float32", "float"}:
-            target_dtype = torch.float32
-
-    if device == "cpu":
-        if use_amx:
-            if IPEX_AVAILABLE:
-                model = ipex.optimize(model, dtype=target_dtype, inplace=True)
-            model = model.to(target_dtype)
-    elif device == "cuda" and target_dtype is not None:
-        model = model.to(target_dtype)
-
-    model.to(target_device)
-
-    chunks: List[torch.Tensor] = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        enc = processor(
-            text=batch,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
-        enc = {k: v.to(target_device) for k, v in enc.items() if hasattr(v, "to")}
-        feats = model.get_text_features(**enc)
-        if normalize:
-            feats = torch.nn.functional.normalize(feats, p=2, dim=1)
-        chunks.append(feats.cpu())
-
-    hidden = chunks[0].shape[-1] if chunks else 0
-    return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
-
-
-def _run_torch_clip_image_embedding(
-    model_id: str,
-    images: List[Any],
-    device: Optional[str],
-    normalize: bool,
-    batch_size: int,
-    trust_remote_code: bool,
-    use_amx: bool,
-    dtype: Optional[str],
-) -> torch.Tensor:
-    if not images:
-        return torch.empty(0, 0)
-
-    try:
-        from PIL import Image
-    except Exception as e:
-        raise RuntimeError(f"Pillow (PIL) is required for CLIP image embeddings: {e}")
-
-    try:
-        from transformers import CLIPModel, CLIPProcessor
-    except Exception as e:
-        raise RuntimeError(f"transformers CLIPModel/CLIPProcessor required for CLIP embeddings: {e}")
-
-    processor = CLIPProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
-    model = CLIPModel.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
-
-    target_device = torch.device(device) if device else model.device
-
-    target_dtype: Optional[torch.dtype] = None
-    if dtype:
-        dt = dtype.lower()
-        if dt in {"bf16", "bfloat16"}:
-            target_dtype = torch.bfloat16
-        elif dt in {"fp16", "float16", "half"}:
-            target_dtype = torch.float16
-        elif dt in {"fp32", "float32", "float"}:
-            target_dtype = torch.float32
-
-    if device == "cpu":
-        if use_amx:
-            if IPEX_AVAILABLE:
-                model = ipex.optimize(model, dtype=target_dtype, inplace=True)
-            model = model.to(target_dtype)
-    elif device == "cuda" and target_dtype is not None:
-        model = model.to(target_dtype)
-
-    model.to(target_device)
-
-    chunks: List[torch.Tensor] = []
-    for i in range(0, len(images), batch_size):
-        batch = images[i : i + batch_size]
-        pil_images: List[Any] = []
-        for x in batch:
-            if isinstance(x, str):
-                pil_images.append(Image.open(x).convert("RGB"))
-            elif hasattr(x, "convert"):
-                pil_images.append(x.convert("RGB"))
-            else:
-                raise ValueError(f"Unsupported image input type for CLIP torch backend: {type(x)}")
-
-        enc = processor(images=pil_images, return_tensors="pt")
-        enc = {k: v.to(target_device) for k, v in enc.items() if hasattr(v, "to")}
-
-        # Cast pixel_values to target dtype if requested.
-        if target_dtype is not None and "pixel_values" in enc:
-            enc["pixel_values"] = enc["pixel_values"].to(dtype=target_dtype)
-
-        feats = model.get_image_features(**enc)
-        if normalize:
-            feats = torch.nn.functional.normalize(feats, p=2, dim=1)
-        chunks.append(feats.cpu())
-
-    hidden = chunks[0].shape[-1] if chunks else 0
-    return torch.cat(chunks, dim=0) if chunks else torch.empty(0, hidden)
 
 
 def _mean_pooling(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:

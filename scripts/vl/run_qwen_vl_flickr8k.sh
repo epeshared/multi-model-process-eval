@@ -30,6 +30,14 @@ set -euo pipefail
 #   DP_SIZE (sglang-offline)
 #   MAX_MODEL_LEN (vllm offline)
 #   GPU_MEMORY_UTILIZATION (vllm offline)
+#
+# Profiling:
+#   PROFILE (0/1/true/false)  -> --profile
+#   PROFILE_RECORD_SHAPES (0/1) -> --profile-record-shapes
+#   PROFILE_ACTIVITIES (default: CPU,CUDA) -> --profile-activities
+#   PROFILE_OUT_DIR (default: "") -> --profile-out-dir
+#   PROFILE_OUT_NAME (default: vl_profile) -> --profile-out-name
+#   PROFILE_STRICT (0/1) -> --profile-strict
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -62,15 +70,13 @@ USE_AMX=${USE_AMX:-0}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 WARMUP=${WARMUP:-0}
 
-# SGLang VL HTTP backend requires a CUDA-capable server for multimodal models.
-# If you want CPU inference, use BACKEND=torch.
-# if [[ "${BACKEND}" == "sglang" ]] && [[ "${DEVICE}" == "cpu" || "${DEVICE}" == cpu:* ]]; then
-#   echo "[run_qwen_vl_flickr8k] ERROR: BACKEND=sglang with DEVICE=cpu is not supported for VL multimodal." >&2
-#   echo "[run_qwen_vl_flickr8k] Cause: the SGLang server typically errors with 'Torch not compiled with CUDA enabled'." >&2
-#   echo "[run_qwen_vl_flickr8k] Fix: either run with BACKEND=torch for CPU inference," >&2
-#   echo "[run_qwen_vl_flickr8k]      or start a CUDA SGLang server and set DEVICE=cuda:0." >&2
-#   exit 2
-# fi
+# Profile envs
+PROFILE=${PROFILE:-0}
+PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES:-0}
+PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES:-CPU}
+PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-sglang_logs/sglang_$PROFILE_ACTIVITIES}
+PROFILE_OUT_NAME=${PROFILE_OUT_NAME:-vl_profile}
+PROFILE_STRICT=${PROFILE_STRICT:-0}
 
 # Optional positional overrides:
 #   $1 -> captions file
@@ -98,6 +104,41 @@ case "${PRINT_MODEL_INFO}" in
     ;;
 esac
 
+# -------------------------
+# Profiling args builder
+# -------------------------
+PROFILE_ARGS=()
+case "${PROFILE}" in
+  1|true|TRUE|yes|YES|on|ON)
+    PROFILE_ARGS+=(--profile)
+
+    case "${PROFILE_RECORD_SHAPES}" in
+      1|true|TRUE|yes|YES|on|ON)
+        PROFILE_ARGS+=(--profile-record-shapes)
+        ;;
+    esac
+
+    if [[ -n "${PROFILE_ACTIVITIES}" ]]; then
+      PROFILE_ARGS+=(--profile-activities "${PROFILE_ACTIVITIES}")
+    fi
+
+    # Only meaningful for offline (torch.profiler export), but safe to pass always.
+    if [[ -n "${PROFILE_OUT_DIR}" ]]; then
+      PROFILE_ARGS+=(--profile-out-dir "${PROFILE_OUT_DIR}")
+    fi
+
+    if [[ -n "${PROFILE_OUT_NAME}" ]]; then
+      PROFILE_ARGS+=(--profile-out-name "${PROFILE_OUT_NAME}")
+    fi
+
+    case "${PROFILE_STRICT}" in
+      1|true|TRUE|yes|YES|on|ON)
+        PROFILE_ARGS+=(--profile-strict)
+        ;;
+    esac
+    ;;
+esac
+
 # Align env vars with scripts/embedding/sglang/start_sglang_server.sh when using sglang-offline.
 if [[ "${BACKEND}" == "sglang-offline" || "${BACKEND}" == "sglang_offline" ]]; then
   export DNNL_MAX_CPU_ISA="${DNNL_MAX_CPU_ISA:-AVX512_CORE_AMX}"
@@ -114,6 +155,12 @@ if [[ "${BACKEND}" == "sglang-offline" || "${BACKEND}" == "sglang_offline" ]]; t
   _SGLANG_LOG_DIR="${ROOT_DIR}/scripts/vl/sglang/sglang_logs/sglang_cpu"
   mkdir -p "${_SGLANG_LOG_DIR}"
   export SGLANG_TORCH_PROFILER_DIR="${SGLANG_TORCH_PROFILER_DIR:-${_SGLANG_LOG_DIR}}"
+
+  # If user didn't set PROFILE_OUT_DIR, default it to SGLANG_TORCH_PROFILER_DIR when profiling is enabled.
+  if [[ -n "${PROFILE_ARGS[*]}" ]] && [[ -z "${PROFILE_OUT_DIR}" ]]; then
+    # update PROFILE_ARGS in-place (append out dir)
+    PROFILE_ARGS+=(--profile-out-dir "${SGLANG_TORCH_PROFILER_DIR}")
+  fi
 
   # Safe LD_PRELOAD join (only add libs that exist; don't clobber existing preload).
   _existing_preload="${LD_PRELOAD:-}"
@@ -165,6 +212,19 @@ echo "[run_qwen_vl_flickr8k] DTYPE=${DTYPE}"
 echo "[run_qwen_vl_flickr8k] USE_AMX=${USE_AMX}"
 echo "[run_qwen_vl_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
 echo "[run_qwen_vl_flickr8k] WARMUP=${WARMUP}"
+echo "[run_qwen_vl_flickr8k] PROFILE=${PROFILE}"
+echo "[run_qwen_vl_flickr8k] PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES}"
+echo "[run_qwen_vl_flickr8k] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
+echo "[run_qwen_vl_flickr8k] PROFILE_OUT_DIR=${PROFILE_OUT_DIR}"
+echo "[run_qwen_vl_flickr8k] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
+echo "[run_qwen_vl_flickr8k] PROFILE_STRICT=${PROFILE_STRICT}"
+
+if [[ ${#PROFILE_ARGS[@]} -gt 0 ]]; then
+  printf '[run_qwen_vl_flickr8k] PROFILE_ARGS='; printf '%q ' "${PROFILE_ARGS[@]}"; printf '\n'
+else
+  echo "[run_qwen_vl_flickr8k] PROFILE_ARGS=<none>"
+fi
+
 if [[ $# -gt 0 ]]; then
   printf '[run_qwen_vl_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
 else
@@ -183,6 +243,7 @@ python scripts/py/run_vl.py \
   --batch-size "${BATCH_SIZE}" \
   --prompt "${PROMPT}" \
   "${WARMUP_ARG[@]}" \
+  "${PROFILE_ARGS[@]}" \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \
   ${BASE_URL:+--base-url "${BASE_URL}"} \

@@ -43,6 +43,14 @@ DATASETS: List[str] = [
 ]
 
 
+def _csv_to_list(s: Optional[str]) -> Optional[List[str]]:
+    if not s:
+        return None
+    parts = [x.strip() for x in str(s).split(",")]
+    parts = [x for x in parts if x]
+    return parts or None
+
+
 def parse_args(argv: Any = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Vision-language (VL) entry point")
     p.add_argument("--model", required=True, choices=VL_MODELS, help="Logical model key")
@@ -104,6 +112,43 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--trust-remote-code", action="store_true", default=False)
     p.add_argument("--attn-implementation", help="eager|sdpa|flash_attention_2")
 
+    # =========================
+    # PROFILING (NEW)
+    # =========================
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable profiling for sglang backends (HTTP: /start_profile;/stop_profile, offline: torch.profiler)",
+    )
+    p.add_argument(
+        "--profile-record-shapes",
+        action="store_true",
+        default=False,
+        help="Profiler: record operator shapes (may increase overhead)",
+    )
+    p.add_argument(
+        "--profile-activities",
+        default="CPU,CUDA",
+        help="Profiler activities CSV, e.g. CPU,CUDA",
+    )
+    p.add_argument(
+        "--profile-out-dir",
+        default="",
+        help="(offline torch.profiler) export chrome trace json to this dir; empty disables export",
+    )
+    p.add_argument(
+        "--profile-out-name",
+        default="vl_profile",
+        help="(offline torch.profiler) chrome trace base name",
+    )
+    p.add_argument(
+        "--profile-strict",
+        action="store_true",
+        default=False,
+        help="If set, fail fast when profiler cannot start",
+    )
+
     # output
     p.add_argument("--output-jsonl", help="Optional path to save per-sample outputs (jsonl)")
     return p.parse_args(argv)
@@ -140,6 +185,19 @@ def main(argv: Any = None) -> None:
     elif backend in {"sglang-offline", "sglang_offline"}:
         backend_kwargs.update({"tp_size": int(args.tp_size), "dp_size": int(args.dp_size)})
 
+    # Build profile kwargs once (pass-through to chat_with_session -> session.chat)
+    profile_kwargs: Dict[str, Any] = {}
+    if bool(args.profile):
+        acts = _csv_to_list(getattr(args, "profile_activities", "CPU,CUDA"))
+        if acts:
+            profile_kwargs["activities"] = acts
+        profile_kwargs["record_shapes"] = bool(getattr(args, "profile_record_shapes", False))
+        out_dir = str(getattr(args, "profile_out_dir", "") or "").strip()
+        if out_dir:
+            profile_kwargs["out_dir"] = out_dir
+        profile_kwargs["out_name"] = str(getattr(args, "profile_out_name", "vl_profile") or "vl_profile")
+        profile_kwargs["strict"] = bool(getattr(args, "profile_strict", False))
+
     session = load_vl_session(
         model_id,
         backend_name=args.backend,
@@ -164,16 +222,15 @@ def main(argv: Any = None) -> None:
             raise ValueError("--image is required when --dataset=single")
 
         if warmup > 0:
-            print(
-                f"[vl.warmup] start dataset=single warmup={warmup} image={args.image}",
-                flush=True,
-            )
+            print(f"[vl.warmup] start dataset=single warmup={warmup} image={args.image}", flush=True)
             for _ in range(warmup):
                 _ = chat_with_session(
                     session,
                     image_paths=args.image,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
+                    profile=False,           # warmup 默认不 profile
+                    profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
 
@@ -183,6 +240,8 @@ def main(argv: Any = None) -> None:
             image_paths=args.image,
             prompt=args.prompt,
             max_new_tokens=args.max_new_tokens,
+            profile=bool(args.profile),
+            profile_kwargs=(profile_kwargs if args.profile else None),
         )
         print(json.dumps({"outputs": out}, indent=2, ensure_ascii=False))
         return
@@ -194,6 +253,7 @@ def main(argv: Any = None) -> None:
         images_dir = args.flickr8k_images_dir or ""
         if not captions_file:
             raise ValueError("--flickr8k-captions-file (or --dataset-path) is required for dataset=flickr8k")
+
         ds = load_flickr8k(
             images_dir=images_dir,
             captions_file=captions_file,
@@ -217,11 +277,13 @@ def main(argv: Any = None) -> None:
                     image_paths=warm_paths,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
+                    profile=False,       # warmup 默认不 profile
+                    profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
 
         # Timing excludes model/client load; session was created above.
-        print(f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs}", flush=True)
+        print(f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs} profile={bool(args.profile)}", flush=True)
         t0 = time.time()
 
         rows: List[Dict[str, Any]] = []
@@ -232,6 +294,8 @@ def main(argv: Any = None) -> None:
                 image_paths=batch_paths,
                 prompt=args.prompt,
                 max_new_tokens=args.max_new_tokens,
+                profile=bool(args.profile),
+                profile_kwargs=(profile_kwargs if args.profile else None),
             )
             for pth, txt in zip(batch_paths, outputs):
                 rows.append({"image": pth, "prompt": args.prompt, "output": txt})
@@ -244,9 +308,11 @@ def main(argv: Any = None) -> None:
             "batch_size": bs,
             "time_sec": elapsed,
             "samples_per_sec": (n / elapsed) if elapsed > 0 else float("inf"),
-            "seconds_per_batch": (elapsed / (n/bs)) if n > 0 else 0.0,
+            "seconds_per_batch": (elapsed / (n / bs)) if n > 0 else 0.0,
             "model_id": model_id,
             "backend": args.backend,
+            "profile": bool(args.profile),
+            "profile_kwargs": profile_kwargs if args.profile else None,
         }
 
         if args.output_jsonl:

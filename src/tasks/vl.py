@@ -1,6 +1,7 @@
+# src/tasks/vl.py
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 
 def _normalize_batch(
@@ -37,7 +38,6 @@ def load_vl_session(
     from per-call chat. Intended for benchmarking where load time should be
     excluded from chat timing.
     """
-
     backend = (backend_name or "torch").lower()
 
     if backend == "torch":
@@ -81,23 +81,30 @@ def load_vl_session(
         _ = api  # reserved for future (native/openai toggles)
         if print_model_info:
             print(f"[vl.load] backend=sglang-http base_url={base_url} model_id={model_id}")
-        return SGLangHTTPVLClient(
+
+        # -----------------------------
+        # ✅ 方案A：给 sglang-http session 打 tag
+        # -----------------------------
+        sess = SGLangHTTPVLClient(
             base_url=base_url,
             model=model_id,
             api_key=api_key,
             timeout=timeout,
             image_transport=image_transport,
         )
+        setattr(sess, "_backend_tag", "sglang-http")
+        return sess
 
     if backend in {"sglang-offline", "sglang_offline"}:
         from .vl_backends.sglang_offline import SGLangOfflineVLClient
 
         if print_model_info:
-            print(f"[vl.load] backend=sglang-offline model_id={model_id} device={device or 'cuda'} dtype={dtype or 'auto'}")
+            print(
+                f"[vl.load] backend=sglang-offline model_id={model_id} "
+                f"device={device or 'cuda'} dtype={dtype or 'auto'}"
+            )
 
         dev = (device or "cuda").lower()
-        # torch.compile graph capture can be extremely memory-hungry on CPU and
-        # may get the scheduler process killed (exit -9). Default to off on CPU.
         default_enable_torch_compile = not dev.startswith("cpu")
         default_torch_compile_max_bs = 32 if default_enable_torch_compile else 1
         return SGLangOfflineVLClient(
@@ -154,15 +161,54 @@ def chat_with_session(
     image_paths: Union[str, Sequence[str]],
     prompt: Union[str, Sequence[str]],
     max_new_tokens: int = 128,
+    # profile knobs (ONLY for sglang-http)
+    profile: bool = False,
+    profile_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> List[str]:
     imgs, pr = _normalize_batch(image_paths, prompt)
+    profile_kwargs = dict(profile_kwargs or {})
 
+    # torch session tuple
     if isinstance(session, tuple) and len(session) == 3 and session[0] == "torch":
         _, torch_client, runtime = session
+        # torch backend ignores profile args (keep stable)
         return torch_client.chat(runtime, image_paths=imgs, prompts=pr, max_new_tokens=max_new_tokens, **kwargs)
 
-    # HTTP/offline clients share a chat(image_paths=..., prompts=...) shape
+    if not hasattr(session, "chat"):
+        raise ValueError(f"Session does not have chat(): {type(session)}")
+
+    # -----------------------------
+    # ✅ 方案A：只认 tag=sglang-http
+    # -----------------------------
+    is_sglang_http = getattr(session, "_backend_tag", "") == "sglang-http"
+
+    # profile only applies to sglang-http
+    if profile and is_sglang_http:
+        started = False
+        try:
+            # 1) start profile (server-side)
+            if hasattr(session, "start_profile"):
+                session.start_profile(**profile_kwargs)
+                started = True
+
+            # 2) run chat (do NOT pass profile args into chat)
+            return session.chat(
+                image_paths=imgs,
+                prompts=pr,
+                max_new_tokens=max_new_tokens,
+                **kwargs,
+            )
+        finally:
+            # 3) stop profile (server-side) only if we started successfully
+            if started and hasattr(session, "stop_profile"):
+                try:
+                    session.stop_profile(**profile_kwargs)
+                except Exception:
+                    # don't hide main exception
+                    pass
+
+    # Non-profile path OR non-sglang-http:
     return session.chat(image_paths=imgs, prompts=pr, max_new_tokens=max_new_tokens, **kwargs)
 
 
@@ -184,6 +230,9 @@ def run_vl_chat(
     api_key: str = "",
     timeout: float = 600.0,
     image_transport: str = "data-url",
+    # NEW:
+    profile: bool = False,
+    profile_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> List[str]:
     session = load_vl_session(
@@ -207,4 +256,6 @@ def run_vl_chat(
         image_paths=image_paths,
         prompt=prompt,
         max_new_tokens=max_new_tokens,
+        profile=profile,
+        profile_kwargs=profile_kwargs,
     )
