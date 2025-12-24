@@ -313,7 +313,6 @@ def embed_with_session(
     normalize: bool = True,
     batch_size: int = 128,
     max_length: int = 512,
-    # 方案A：profile 只在这一层对 sglang-http 生效
     profile: bool = False,
     profile_kwargs: Optional[dict] = None,
     **kwargs: Any,

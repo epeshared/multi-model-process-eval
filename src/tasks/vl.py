@@ -82,9 +82,6 @@ def load_vl_session(
         if print_model_info:
             print(f"[vl.load] backend=sglang-http base_url={base_url} model_id={model_id}")
 
-        # -----------------------------
-        # ✅ 方案A：给 sglang-http session 打 tag
-        # -----------------------------
         sess = SGLangHTTPVLClient(
             base_url=base_url,
             model=model_id,
