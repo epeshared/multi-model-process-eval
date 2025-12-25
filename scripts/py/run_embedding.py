@@ -41,14 +41,11 @@ DATASET_LOADERS: Dict[str, Dict[str, Any]] = {
     "flickr8k": {
         "modality": "both",
     },
+    # NEW: synthetic token-only text dataset
+    "synthetic_tokens": {
+        "modality": "text",
+    },
 }
-
-
-def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
-    if dataset == "yahoo_answers":
-        from src.data import load_yahoo_answers_jsonl
-        return load_yahoo_answers_jsonl, "text"
-    raise ValueError(f"Unknown dataset: {dataset}")
 
 
 def _norm_base_url(base_url: str | None) -> str | None:
@@ -80,6 +77,47 @@ def _parse_activities(s: Optional[str]) -> List[str]:
     return [p for p in parts if p]
 
 
+# -------------------------
+# NEW: synthetic dataset generator
+# -------------------------
+def _gen_synthetic_token_texts(
+    num_samples: int,
+    token_len: int,
+    seed: int = 12345,
+) -> List[str]:
+    """
+    Generate pseudo-token texts like: "w123 w456 ...", aiming for ~token_len tokens.
+    This is tokenizer-agnostic and fast; exact token counts may vary per tokenizer.
+    """
+    import random
+
+    if num_samples <= 0:
+        return []
+    if token_len <= 0:
+        raise ValueError("--synthetic-token-len must be > 0 when --dataset=synthetic_tokens")
+
+    rng = random.Random(seed)
+    out: List[str] = []
+    for _ in range(num_samples):
+        toks = [f"w{rng.randint(0, 999999)}" for _ in range(token_len)]
+        out.append(" ".join(toks))
+    return out
+
+
+def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
+    if dataset == "yahoo_answers":
+        from src.data import load_yahoo_answers_jsonl
+        return load_yahoo_answers_jsonl, "text"
+
+    if dataset == "synthetic_tokens":
+        # The loader signature is custom: (num_samples, token_len, seed)
+        def _loader(*, num_samples: int, token_len: int, seed: int) -> List[str]:
+            return _gen_synthetic_token_texts(num_samples=num_samples, token_len=token_len, seed=seed)
+        return _loader, "text"
+
+    raise ValueError(f"Unknown dataset: {dataset}")
+
+
 def parse_args(argv: Any = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Embedding entry point")
     parser.add_argument("--model", required=True, choices=EMBED_MODELS, help="Logical model key")
@@ -89,9 +127,28 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     )
     parser.add_argument("--backend", choices=EMBED_BACKENDS, default="torch")
     parser.add_argument("--dataset", required=True, choices=list(DATASET_LOADERS.keys()), help="Dataset key under src/data")
-    parser.add_argument("--dataset-path", required=True, help="Path to the dataset source file (e.g., JSONL)")
+
+    # NOTE: dataset-path is optional now; we validate it based on dataset type in main().
+    parser.add_argument("--dataset-path", default="", help="Path to the dataset source file (e.g., JSONL)")
+
     parser.add_argument("--yahoo-mode", choices=["q", "a", "q+a"], default="q", help="Yahoo answers embedding mode")
     parser.add_argument("--max-samples", type=int, default=-1, help="Maximum samples to load (-1 for all)")
+
+    # -------------------------
+    # NEW: Synthetic token dataset options (used when --dataset=synthetic_tokens)
+    # -------------------------
+    parser.add_argument(
+        "--synthetic-token-len",
+        type=int,
+        default=0,
+        help="When --dataset=synthetic_tokens, generate texts with ~this many tokens (e.g., 20).",
+    )
+    parser.add_argument(
+        "--synthetic-seed",
+        type=int,
+        default=12345,
+        help="Random seed for synthetic dataset generation.",
+    )
 
     # Flickr8k dataset options (used when --dataset=flickr8k)
     parser.add_argument("--flickr8k-images-dir", help="Flickr8k images directory (contains *.jpg)")
@@ -163,7 +220,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     parser.add_argument(
         "--profile-record-shapes",
         action="store_true",
-        default=False,
+        default=True,
         help="Record shapes in profiler (where supported)",
     )
     parser.add_argument(
@@ -261,6 +318,7 @@ def main(argv: Any = None) -> None:
             profile=False,
         )
 
+    # Flickr8k branch unchanged
     if args.dataset == "flickr8k":
         from src.data import load_flickr8k
 
@@ -349,13 +407,34 @@ def main(argv: Any = None) -> None:
     # Default (text-only) datasets
     loader, modality = _get_dataset_loader(args.dataset)
 
-    if args.dataset == "yahoo_answers":
+    # -------------------------
+    # NEW: synthetic_tokens branch
+    # -------------------------
+    if args.dataset == "synthetic_tokens":
+        max_samples = int(args.max_samples)
+        if max_samples <= 0:
+            raise ValueError("--max-samples must be > 0 when --dataset=synthetic_tokens")
+        if int(args.synthetic_token_len) <= 0:
+            raise ValueError("--synthetic-token-len must be > 0 when --dataset=synthetic_tokens")
+
+        inputs = loader(
+            num_samples=max_samples,
+            token_len=int(args.synthetic_token_len),
+            seed=int(args.synthetic_seed),
+        )
+
+    elif args.dataset == "yahoo_answers":
+        if not args.dataset_path:
+            raise ValueError("--dataset-path is required for --dataset=yahoo_answers")
         inputs = loader(path=args.dataset_path, mode=args.yahoo_mode, max_records=args.max_samples)
+
     else:
+        if not args.dataset_path:
+            raise ValueError(f"--dataset-path is required for --dataset={args.dataset}")
         inputs = loader(path=args.dataset_path, max_records=args.max_samples)
 
     if not inputs:
-        raise ValueError(f"No inputs loaded from dataset {args.dataset} at {args.dataset_path}")
+        raise ValueError(f"No inputs loaded/generated for dataset {args.dataset}")
 
     _maybe_warmup(inputs, modality)
 
@@ -395,6 +474,14 @@ def main(argv: Any = None) -> None:
         "backend": args.backend,
         "dataset": args.dataset,
     }
+
+    if args.dataset == "synthetic_tokens":
+        summary.update(
+            {
+                "synthetic_token_len": int(args.synthetic_token_len),
+                "synthetic_seed": int(args.synthetic_seed),
+            }
+        )
 
     if args.output_path:
         import torch

@@ -11,6 +11,7 @@ echo "WORK_HOME=$WORK_HOME"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
 MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct"}
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-0.6B"
+# MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
 ###############################################
 echo "Using model: $MODEL_DIR"
 
@@ -88,9 +89,12 @@ python -m sglang.launch_server \
   --enable-torch-compile \
   --torch-compile-max-bs "$BATCH_SIZE" \
   --attention-backend intel_amx \
-  --disable-fast-image-processor \
   --enable-tokenizer-batch-encode \
-  --log-level error
+  --log-level error \
+  --disable-fast-image-processor
+  
+
+# --disable-fast-image-processor \  
 
 # numactl -C 0-15 \
 # python -m sglang.launch_server \

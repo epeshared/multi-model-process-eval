@@ -124,7 +124,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument(
         "--profile-record-shapes",
         action="store_true",
-        default=False,
+        default=True,
         help="Profiler: record operator shapes (may increase overhead)",
     )
     p.add_argument(
@@ -191,7 +191,7 @@ def main(argv: Any = None) -> None:
         acts = _csv_to_list(getattr(args, "profile_activities", "CPU,CUDA"))
         if acts:
             profile_kwargs["activities"] = acts
-        profile_kwargs["record_shapes"] = bool(getattr(args, "profile_record_shapes", False))
+        profile_kwargs["record_shapes"] = bool(getattr(args, "profile_record_shapes", True))
         out_dir = str(getattr(args, "profile_out_dir", "") or "").strip()
         if out_dir:
             profile_kwargs["out_dir"] = out_dir
