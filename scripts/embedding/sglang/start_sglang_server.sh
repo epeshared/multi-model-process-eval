@@ -66,7 +66,7 @@ python -m sglang.launch_server \
   --torch-compile-max-bs "$BATCH_SIZE" \
   --attention-backend intel_amx \
   --enable-tokenizer-batch-encode \
-  --log-level error
+  --log-level info
 
 # numactl -C 0-15 \
 # python -m sglang.launch_server \

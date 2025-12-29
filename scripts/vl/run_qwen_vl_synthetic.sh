@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run Qwen2.5-VL on Flickr8k images via scripts/py/run_vl.py.
+# Run Qwen2.5-VL on synthetic random images via scripts/py/run_vl.py.
 #
 # Env overrides:
 #   MODEL (default: qwen2.5-vl-7b-instruct)
-#   MODEL_ID (default: Qwen/Qwen2.5-VL-7B-Instruct)
+#   MODEL_ID (default: /mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct)
 #   BACKEND (default: torch)
 #   PROMPT (default: "Describe the image.")
-#   FLICKR8K_IMAGES_DIR
-#   FLICKR8K_CAPTIONS_FILE (Flickr8k.token.txt)
-#   MAX_SAMPLES
+#
+# Synthetic dataset:
+#   SYNTHETIC_IMAGE_SIZE (default: 224x224)   # e.g. 224x224, 336,336, "224 224", "224" (square)
+#   SYNTHETIC_NUM_IMAGES (default: 50)
+#   SYNTHETIC_SEED (default: 1234)
+#   SYNTHETIC_OUT_DIR (default: "")           # empty => temp dir created by run_vl.py
+#
+# Common:
 #   BATCH_SIZE
 #   DEVICE
 #   DTYPE
@@ -38,13 +43,18 @@ set -euo pipefail
 #   PROFILE_OUT_DIR (default: "") -> --profile-out-dir
 #   PROFILE_OUT_NAME (default: vl_profile) -> --profile-out-name
 #   PROFILE_STRICT (0/1) -> --profile-strict
+#
+# Optional positional overrides:
+#   $1 -> SYNTHETIC_IMAGE_SIZE
+#   $2 -> SYNTHETIC_NUM_IMAGES
+#   $3 -> SYNTHETIC_OUT_DIR
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
 MODEL=${MODEL:-qwen2.5-vl-7b-instruct}
 MODEL_ID=${MODEL_ID:-/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct}
-BACKEND=${BACKEND:-torch}
+BACKEND=${BACKEND:-sglang}
 PROMPT=${PROMPT:-"Describe the image."}
 
 BASE_URL=${BASE_URL:-http://127.0.0.1:30000}
@@ -58,10 +68,11 @@ DP_SIZE=${DP_SIZE:-1}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.90}
 
-FLICKR8K_IMAGES_DIR=${FLICKR8K_IMAGES_DIR:-/home/xtang/datasets/Flickr8k/Flicker8k_Dataset}
-FLICKR8K_CAPTIONS_FILE=${FLICKR8K_CAPTIONS_FILE:-/home/xtang/datasets/Flickr8k/Flickr8k.token.txt}
+SYNTHETIC_IMAGE_SIZE=${SYNTHETIC_IMAGE_SIZE:-224x224}
+SYNTHETIC_NUM_IMAGES=${SYNTHETIC_NUM_IMAGES:-50}
+SYNTHETIC_SEED=${SYNTHETIC_SEED:-1234}
+SYNTHETIC_OUT_DIR=${SYNTHETIC_OUT_DIR:-}
 
-MAX_SAMPLES=${MAX_SAMPLES:-50}
 BATCH_SIZE=${BATCH_SIZE:-1}
 # DEVICE=${DEVICE:-cuda:0}
 DEVICE=${DEVICE:-cpu}
@@ -78,16 +89,20 @@ PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-sglang_logs/sglang_$PROFILE_ACTIVITIES}
 PROFILE_OUT_NAME=${PROFILE_OUT_NAME:-vl_profile}
 PROFILE_STRICT=${PROFILE_STRICT:-0}
 
-
 # Optional positional overrides:
-#   $1 -> captions file
-#   $2 -> images dir
+#   $1 -> image size
+#   $2 -> num images
+#   $3 -> out dir
 if [[ $# -gt 0 ]]; then
-  FLICKR8K_CAPTIONS_FILE="$1"
+  SYNTHETIC_IMAGE_SIZE="$1"
   shift
 fi
 if [[ $# -gt 0 ]]; then
-  FLICKR8K_IMAGES_DIR="$1"
+  SYNTHETIC_NUM_IMAGES="$1"
+  shift
+fi
+if [[ $# -gt 0 ]]; then
+  SYNTHETIC_OUT_DIR="$1"
   shift
 fi
 
@@ -159,7 +174,6 @@ if [[ "${BACKEND}" == "sglang-offline" || "${BACKEND}" == "sglang_offline" ]]; t
 
   # If user didn't set PROFILE_OUT_DIR, default it to SGLANG_TORCH_PROFILER_DIR when profiling is enabled.
   if [[ -n "${PROFILE_ARGS[*]}" ]] && [[ -z "${PROFILE_OUT_DIR}" ]]; then
-    # update PROFILE_ARGS in-place (append out dir)
     PROFILE_ARGS+=(--profile-out-dir "${SGLANG_TORCH_PROFILER_DIR}")
   fi
 
@@ -191,56 +205,63 @@ if [[ "${WARMUP}" != "" && "${WARMUP}" != "0" ]]; then
   fi
 fi
 
+# Synthetic out dir arg (optional)
+SYNTHETIC_OUT_DIR_ARG=()
+if [[ -n "${SYNTHETIC_OUT_DIR}" ]]; then
+  SYNTHETIC_OUT_DIR_ARG=(--synthetic-out-dir "${SYNTHETIC_OUT_DIR}")
+fi
+
 cd "${ROOT_DIR}"
 
-echo "[run_qwen_vl_flickr8k] MODEL=${MODEL}"
-echo "[run_qwen_vl_flickr8k] MODEL_ID=${MODEL_ID}"
-echo "[run_qwen_vl_flickr8k] BACKEND=${BACKEND}"
-echo "[run_qwen_vl_flickr8k] BASE_URL=${BASE_URL}"
-echo "[run_qwen_vl_flickr8k] API=${API}"
-echo "[run_qwen_vl_flickr8k] IMAGE_TRANSPORT=${IMAGE_TRANSPORT}"
-echo "[run_qwen_vl_flickr8k] TP_SIZE=${TP_SIZE}"
-echo "[run_qwen_vl_flickr8k] DP_SIZE=${DP_SIZE}"
-echo "[run_qwen_vl_flickr8k] MAX_MODEL_LEN=${MAX_MODEL_LEN}"
-echo "[run_qwen_vl_flickr8k] GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
-echo "[run_qwen_vl_flickr8k] PROMPT=${PROMPT}"
-echo "[run_qwen_vl_flickr8k] FLICKR8K_CAPTIONS_FILE=${FLICKR8K_CAPTIONS_FILE}"
-echo "[run_qwen_vl_flickr8k] FLICKR8K_IMAGES_DIR=${FLICKR8K_IMAGES_DIR}"
-echo "[run_qwen_vl_flickr8k] MAX_SAMPLES=${MAX_SAMPLES}"
-echo "[run_qwen_vl_flickr8k] BATCH_SIZE=${BATCH_SIZE}"
-echo "[run_qwen_vl_flickr8k] DEVICE=${DEVICE}"
-echo "[run_qwen_vl_flickr8k] DTYPE=${DTYPE}"
-echo "[run_qwen_vl_flickr8k] USE_AMX=${USE_AMX}"
-echo "[run_qwen_vl_flickr8k] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
-echo "[run_qwen_vl_flickr8k] WARMUP=${WARMUP}"
-echo "[run_qwen_vl_flickr8k] PROFILE=${PROFILE}"
-echo "[run_qwen_vl_flickr8k] PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES}"
-echo "[run_qwen_vl_flickr8k] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
-echo "[run_qwen_vl_flickr8k] PROFILE_OUT_DIR=${PROFILE_OUT_DIR}"
-echo "[run_qwen_vl_flickr8k] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
-echo "[run_qwen_vl_flickr8k] PROFILE_STRICT=${PROFILE_STRICT}"
+echo "[run_qwen_vl_synthetic] MODEL=${MODEL}"
+echo "[run_qwen_vl_synthetic] MODEL_ID=${MODEL_ID}"
+echo "[run_qwen_vl_synthetic] BACKEND=${BACKEND}"
+echo "[run_qwen_vl_synthetic] BASE_URL=${BASE_URL}"
+echo "[run_qwen_vl_synthetic] API=${API}"
+echo "[run_qwen_vl_synthetic] IMAGE_TRANSPORT=${IMAGE_TRANSPORT}"
+echo "[run_qwen_vl_synthetic] TP_SIZE=${TP_SIZE}"
+echo "[run_qwen_vl_synthetic] DP_SIZE=${DP_SIZE}"
+echo "[run_qwen_vl_synthetic] MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "[run_qwen_vl_synthetic] GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
+echo "[run_qwen_vl_synthetic] PROMPT=${PROMPT}"
+echo "[run_qwen_vl_synthetic] SYNTHETIC_IMAGE_SIZE=${SYNTHETIC_IMAGE_SIZE}"
+echo "[run_qwen_vl_synthetic] SYNTHETIC_NUM_IMAGES=${SYNTHETIC_NUM_IMAGES}"
+echo "[run_qwen_vl_synthetic] SYNTHETIC_SEED=${SYNTHETIC_SEED}"
+echo "[run_qwen_vl_synthetic] SYNTHETIC_OUT_DIR=${SYNTHETIC_OUT_DIR:-<tmp>}"
+echo "[run_qwen_vl_synthetic] BATCH_SIZE=${BATCH_SIZE}"
+echo "[run_qwen_vl_synthetic] DEVICE=${DEVICE}"
+echo "[run_qwen_vl_synthetic] DTYPE=${DTYPE}"
+echo "[run_qwen_vl_synthetic] USE_AMX=${USE_AMX}"
+echo "[run_qwen_vl_synthetic] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
+echo "[run_qwen_vl_synthetic] WARMUP=${WARMUP}"
+echo "[run_qwen_vl_synthetic] PROFILE=${PROFILE}"
+echo "[run_qwen_vl_synthetic] PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES}"
+echo "[run_qwen_vl_synthetic] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
+echo "[run_qwen_vl_synthetic] PROFILE_OUT_DIR=${PROFILE_OUT_DIR}"
+echo "[run_qwen_vl_synthetic] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
+echo "[run_qwen_vl_synthetic] PROFILE_STRICT=${PROFILE_STRICT}"
 
 if [[ ${#PROFILE_ARGS[@]} -gt 0 ]]; then
-  printf '[run_qwen_vl_flickr8k] PROFILE_ARGS='; printf '%q ' "${PROFILE_ARGS[@]}"; printf '\n'
+  printf '[run_qwen_vl_synthetic] PROFILE_ARGS='; printf '%q ' "${PROFILE_ARGS[@]}"; printf '\n'
 else
-  echo "[run_qwen_vl_flickr8k] PROFILE_ARGS=<none>"
+  echo "[run_qwen_vl_synthetic] PROFILE_ARGS=<none>"
 fi
 
 if [[ $# -gt 0 ]]; then
-  printf '[run_qwen_vl_flickr8k] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
+  printf '[run_qwen_vl_synthetic] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
 else
-  echo "[run_qwen_vl_flickr8k] EXTRA_ARGS=<none>"
+  echo "[run_qwen_vl_synthetic] EXTRA_ARGS=<none>"
 fi
 
 python scripts/py/run_vl.py \
   --model "${MODEL}" \
   --model-id "${MODEL_ID}" \
   --backend "${BACKEND}" \
-  --dataset flickr8k \
-  --dataset-path "${FLICKR8K_CAPTIONS_FILE}" \
-  --flickr8k-captions-file "${FLICKR8K_CAPTIONS_FILE}" \
-  --flickr8k-images-dir "${FLICKR8K_IMAGES_DIR}" \
-  --max-samples "${MAX_SAMPLES}" \
+  --dataset synthetic \
+  --synthetic-image-size "${SYNTHETIC_IMAGE_SIZE}" \
+  --synthetic-num-images "${SYNTHETIC_NUM_IMAGES}" \
+  --synthetic-seed "${SYNTHETIC_SEED}" \
+  "${SYNTHETIC_OUT_DIR_ARG[@]}" \
   --batch-size "${BATCH_SIZE}" \
   --prompt "${PROMPT}" \
   "${WARMUP_ARG[@]}" \

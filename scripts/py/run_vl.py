@@ -5,11 +5,11 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 import signal
 import time
-from typing import Any, Dict, List, Optional
-
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 # Allow running this script directly without installing the package.
 # When executed as `python scripts/py/run_vl.py`, Python adds `scripts/py` to sys.path,
@@ -40,6 +40,7 @@ VL_BACKENDS: List[str] = [
 DATASETS: List[str] = [
     "single",
     "flickr8k",
+    "synthetic",  # NEW
 ]
 
 
@@ -49,6 +50,60 @@ def _csv_to_list(s: Optional[str]) -> Optional[List[str]]:
     parts = [x.strip() for x in str(s).split(",")]
     parts = [x for x in parts if x]
     return parts or None
+
+
+def _parse_hw(s: Optional[str], default_hw: str = "224x224") -> Tuple[int, int]:
+    """
+    Parse image size string:
+      - "224x224"
+      - "224,224"
+      - "224 224"
+      - "224" (square)
+    Returns (H, W).
+    """
+    raw = (s or "").strip() or default_hw
+    raw = raw.lower().replace("*", "x")
+
+    for sep in ["x", ",", " "]:
+        if sep in raw:
+            parts = [p for p in raw.split(sep) if p.strip()]
+            if len(parts) == 2:
+                h = int(parts[0].strip())
+                w = int(parts[1].strip())
+                if h <= 0 or w <= 0:
+                    raise ValueError(f"Invalid synthetic image size: {s}")
+                return (h, w)
+
+    if raw.isdigit():
+        v = int(raw)
+        if v <= 0:
+            raise ValueError(f"Invalid synthetic image size: {s}")
+        return (v, v)
+
+    raise ValueError(f"Invalid synthetic image size format: {s} (expected 224x224 / 224,224 / '224 224')")
+
+
+def _gen_synthetic_images(out_dir: str, n: int, h: int, w: int, seed: int) -> List[str]:
+    """
+    Generate N random RGB images of size HxW, saved as PNG files.
+    Returns list of file paths.
+
+    Requires: numpy, pillow
+    """
+    # Local import to avoid forcing deps for non-synthetic runs
+    import numpy as np
+    from PIL import Image
+
+    os.makedirs(out_dir, exist_ok=True)
+    rng = np.random.default_rng(int(seed))
+    paths: List[str] = []
+    for i in range(int(n)):
+        arr = rng.integers(0, 256, size=(h, w, 3), dtype=np.uint8)
+        img = Image.fromarray(arr, mode="RGB")
+        p = os.path.join(out_dir, f"synthetic_{h}x{w}_{i:06d}.png")
+        img.save(p)
+        paths.append(p)
+    return paths
 
 
 def parse_args(argv: Any = None) -> argparse.Namespace:
@@ -69,6 +124,16 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--flickr8k-captions-file", help="Flickr8k.token.txt path")
     p.add_argument("--max-samples", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=1)
+
+    # synthetic (NEW)
+    p.add_argument("--synthetic-image-size", default="224x224", help="e.g. 224x224 or 224,224 or '224 224'")
+    p.add_argument("--synthetic-num-images", type=int, default=50, help="How many random images to generate")
+    p.add_argument("--synthetic-seed", type=int, default=1234, help="RNG seed for synthetic images")
+    p.add_argument(
+        "--synthetic-out-dir",
+        default="",
+        help="Where to save synthetic images; empty => use a temp dir",
+    )
 
     # generation/runtime
     p.add_argument("--max-new-tokens", type=int, default=128)
@@ -121,6 +186,9 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         default=False,
         help="Enable profiling for sglang backends (HTTP: /start_profile;/stop_profile, offline: torch.profiler)",
     )
+    # NOTE: argparse boolean flags should default=False when action=store_true
+    # If you want default True, then make it store_false with --no-xxx style.
+    # Here we keep your original intention: record_shapes default True.
     p.add_argument(
         "--profile-record-shapes",
         action="store_true",
@@ -229,7 +297,7 @@ def main(argv: Any = None) -> None:
                     image_paths=args.image,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
-                    profile=False,           # warmup 默认不 profile
+                    profile=False,  # warmup 默认不 profile
                     profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
@@ -277,13 +345,16 @@ def main(argv: Any = None) -> None:
                     image_paths=warm_paths,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
-                    profile=False,       # warmup 默认不 profile
+                    profile=False,  # warmup 默认不 profile
                     profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
 
         # Timing excludes model/client load; session was created above.
-        print(f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs} profile={bool(args.profile)}", flush=True)
+        print(
+            f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs} profile={bool(args.profile)}",
+            flush=True,
+        )
         t0 = time.time()
 
         rows: List[Dict[str, Any]] = []
@@ -323,6 +394,107 @@ def main(argv: Any = None) -> None:
             rec["output_jsonl"] = args.output_jsonl
 
         print(json.dumps(rec, indent=2, ensure_ascii=False))
+        return
+
+    if args.dataset == "synthetic":
+        # Generate random images -> reuse the same batching + timing path
+        bs = max(1, int(args.batch_size))
+        n = max(0, int(getattr(args, "synthetic_num_images", 0) or 0))
+        if n <= 0:
+            raise ValueError("--synthetic-num-images must be > 0 for dataset=synthetic")
+
+        h, w = _parse_hw(getattr(args, "synthetic_image_size", "224x224"))
+
+        out_dir = str(getattr(args, "synthetic_out_dir", "") or "").strip()
+        tmp_ctx: Optional[tempfile.TemporaryDirectory] = None
+        if not out_dir:
+            tmp_ctx = tempfile.TemporaryDirectory(prefix=f"vl_synth_{h}x{w}_")
+            out_dir = tmp_ctx.name
+
+        image_paths = _gen_synthetic_images(
+            out_dir=out_dir,
+            n=n,
+            h=h,
+            w=w,
+            seed=int(getattr(args, "synthetic_seed", 1234)),
+        )
+
+        if warmup > 0 and len(image_paths) > 0:
+            warm_paths = image_paths[: min(bs, len(image_paths))]
+            print(
+                f"[vl.warmup] start dataset=synthetic warmup={warmup} warmup_batch={len(warm_paths)} "
+                f"batch_size={bs} image_size={h}x{w}",
+                flush=True,
+            )
+            for _ in range(warmup):
+                _ = chat_with_session(
+                    session,
+                    image_paths=warm_paths,
+                    prompt=args.prompt,
+                    max_new_tokens=args.max_new_tokens,
+                    profile=False,  # warmup 默认不 profile
+                    profile_kwargs=None,
+                )
+            print("[vl.warmup] done", flush=True)
+
+        print(
+            f"[vl.run] start timing dataset=synthetic count={len(image_paths)} batch_size={bs} "
+            f"image_size={h}x{w} profile={bool(args.profile)}",
+            flush=True,
+        )
+        t0 = time.time()
+
+        rows: List[Dict[str, Any]] = []
+        for i in range(0, len(image_paths), bs):
+            batch_paths = image_paths[i : i + bs]
+            outputs = chat_with_session(
+                session,
+                image_paths=batch_paths,
+                prompt=args.prompt,
+                max_new_tokens=args.max_new_tokens,
+                profile=bool(args.profile),
+                profile_kwargs=(profile_kwargs if args.profile else None),
+            )
+            for pth, txt in zip(batch_paths, outputs):
+                rows.append(
+                    {
+                        "image": pth,
+                        "prompt": args.prompt,
+                        "output": txt,
+                        "synthetic_image_size": f"{h}x{w}",
+                    }
+                )
+
+        t1 = time.time()
+        elapsed = t1 - t0
+        rec = {
+            "dataset": "synthetic",
+            "count": len(image_paths),
+            "batch_size": bs,
+            "image_size": f"{h}x{w}",
+            "time_sec": elapsed,
+            "samples_per_sec": (len(image_paths) / elapsed) if elapsed > 0 else float("inf"),
+            "seconds_per_batch": (elapsed / (len(image_paths) / bs)) if len(image_paths) > 0 else 0.0,
+            "model_id": model_id,
+            "backend": args.backend,
+            "profile": bool(args.profile),
+            "profile_kwargs": profile_kwargs if args.profile else None,
+            "synthetic_out_dir": out_dir,
+            "synthetic_seed": int(getattr(args, "synthetic_seed", 1234)),
+        }
+
+        if args.output_jsonl:
+            os.makedirs(os.path.dirname(args.output_jsonl) or ".", exist_ok=True)
+            with open(args.output_jsonl, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            rec["output_jsonl"] = args.output_jsonl
+
+        print(json.dumps(rec, indent=2, ensure_ascii=False))
+
+        # If we used a temp dir, clean it after printing output.
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
         return
 
     raise ValueError(f"Unknown dataset: {args.dataset}")
