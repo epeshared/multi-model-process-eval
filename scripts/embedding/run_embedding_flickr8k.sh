@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run embeddings on Flickr8k (images + captions) via scripts/py/run_embedding.py.
+# Run embeddings on Flickr8k (images + captions) via scripts/embedding/run_embedding.py.
 #
 # Environment overrides:
 #   MODEL (default: clip-vit-base-patch32)
@@ -183,7 +183,7 @@ case "${PROFILE_STRICT}" in
     ;;
 esac
 
-python scripts/py/run_embedding.py \
+python scripts/embedding/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
   --backend "${BACKEND}" \

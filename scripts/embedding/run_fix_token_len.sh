@@ -36,7 +36,7 @@ ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
 MODEL=${MODEL:-qwen3-embedding-4b}
 MODEL_ID=${MODEL_ID:-/home/xtang/models/Qwen/Qwen3-Embedding-4B}
-BACKEND=${BACKEND:-sglang-offline}
+BACKEND=${BACKEND:-sglang}
 
 MAX_SAMPLES=${MAX_SAMPLES:-1000}
 BATCH_SIZE=${BATCH_SIZE:-100}
@@ -47,7 +47,7 @@ BASE_URL=${BASE_URL:-http://127.0.0.1:30000}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 
-SYNTHETIC_TOKEN_LEN=${SYNTHETIC_TOKEN_LEN:-0}
+SYNTHETIC_TOKEN_LEN=${SYNTHETIC_TOKEN_LEN:-20}
 SYNTHETIC_SEED=${SYNTHETIC_SEED:-12345}
 
 # Optional positional override: first arg = token_len
@@ -175,7 +175,7 @@ else
   echo "[run_embedding_synth] EXTRA_ARGS=<none>"
 fi
 
-python scripts/py/run_embedding.py \
+python scripts/embedding/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
   --backend "${BACKEND}" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run embeddings on the yahoo_answers JSONL dataset using scripts/py/run_embedding.py.
+# Run embeddings on the yahoo_answers JSONL dataset using scripts/embedding/run_embedding.py.
 #
 # Environment overrides:
 #   MODEL (default: qwen3-embedding-4b)
@@ -155,7 +155,7 @@ else
   echo "[run_embedding_yahoo] EXTRA_ARGS=<none>"
 fi
 
-python scripts/py/run_embedding.py \
+python scripts/embedding/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
   --backend "${BACKEND}" \

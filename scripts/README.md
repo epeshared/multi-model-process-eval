@@ -1,6 +1,6 @@
 # Scripts: Embedding Runs
 
-This folder contains small shell wrappers around the Python entrypoints in `scripts/py/`.
+This folder contains small shell wrappers around the Python entrypoints under `scripts/embedding/`, `scripts/vl/`, and `scripts/omni/`.
 
 ## Yahoo Answers embedding
 
@@ -8,7 +8,7 @@ Script: `embedding/run_embedding_yahoo.sh`
 
 ### Yahoo: What it does
 
-Runs text embeddings on the Yahoo Answers JSONL dataset via `scripts/py/run_embedding.py`.
+Runs text embeddings on the Yahoo Answers JSONL dataset via `scripts/embedding/run_embedding.py`.
 
 ### Yahoo: Inputs
 
@@ -71,7 +71,7 @@ Script: `embedding/run_embedding_flickr8k.sh`
 
 ### Flickr8k: What it does
 
-Runs Flickr8k caption text embeddings and/or image embeddings (CLIP-style multimodal) via `scripts/py/run_embedding.py`.
+Runs Flickr8k caption text embeddings and/or image embeddings (CLIP-style multimodal) via `scripts/embedding/run_embedding.py`.
 
 ### Flickr8k: Inputs
 
@@ -138,4 +138,4 @@ BACKEND=sglang BASE_URL=http://127.0.0.1:30000 FLICKR8K_MODALITY=text \
 
 Script: `embedding/run_qwen_vl_flickr8k.sh`
 
-Runs a vision-language model over Flickr8k images via `scripts/py/run_vl.py`.
+Runs a vision-language model over Flickr8k images via `scripts/vl/run_vl.py`.

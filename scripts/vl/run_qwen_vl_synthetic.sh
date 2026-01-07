@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run Qwen2.5-VL on synthetic random images via scripts/py/run_vl.py.
+# Run Qwen2.5-VL on synthetic random images via scripts/vl/run_vl.py.
 #
 # Env overrides:
 #   MODEL (default: qwen2.5-vl-7b-instruct)
@@ -253,7 +253,7 @@ else
   echo "[run_qwen_vl_synthetic] EXTRA_ARGS=<none>"
 fi
 
-python scripts/py/run_vl.py \
+python scripts/vl/run_vl.py \
   --model "${MODEL}" \
   --model-id "${MODEL_ID}" \
   --backend "${BACKEND}" \

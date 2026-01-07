@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # Allow running this script directly without installing the package.
-# When executed as `python scripts/py/run_vl.py`, Python adds `scripts/py` to sys.path,
+# When executed as `python scripts/vl/run_vl.py`, Python adds `scripts/vl` to sys.path,
 # but not the repository root, so `import src...` would fail.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _repo_root_str = str(_REPO_ROOT)
@@ -53,14 +53,7 @@ def _csv_to_list(s: Optional[str]) -> Optional[List[str]]:
 
 
 def _parse_hw(s: Optional[str], default_hw: str = "224x224") -> Tuple[int, int]:
-    """
-    Parse image size string:
-      - "224x224"
-      - "224,224"
-      - "224 224"
-      - "224" (square)
-    Returns (H, W).
-    """
+    """Parse image size string into (H, W)."""
     raw = (s or "").strip() or default_hw
     raw = raw.lower().replace("*", "x")
 
@@ -84,13 +77,7 @@ def _parse_hw(s: Optional[str], default_hw: str = "224x224") -> Tuple[int, int]:
 
 
 def _gen_synthetic_images(out_dir: str, n: int, h: int, w: int, seed: int) -> List[str]:
-    """
-    Generate N random RGB images of size HxW, saved as PNG files.
-    Returns list of file paths.
-
-    Requires: numpy, pillow
-    """
-    # Local import to avoid forcing deps for non-synthetic runs
+    """Generate N random RGB images of size HxW, saved as PNG files."""
     import numpy as np
     from PIL import Image
 
@@ -104,6 +91,10 @@ def _gen_synthetic_images(out_dir: str, n: int, h: int, w: int, seed: int) -> Li
         img.save(p)
         paths.append(p)
     return paths
+
+
+# NOTE: rest of this file is identical to the previously-used runner (moved),
+# kept in place to preserve behavior for existing shell scripts.
 
 
 def parse_args(argv: Any = None) -> argparse.Namespace:
@@ -125,7 +116,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--max-samples", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=1)
 
-    # synthetic (NEW)
+    # synthetic
     p.add_argument("--synthetic-image-size", default="224x224", help="e.g. 224x224 or 224,224 or '224 224'")
     p.add_argument("--synthetic-num-images", type=int, default=50, help="How many random images to generate")
     p.add_argument("--synthetic-seed", type=int, default=1234, help="RNG seed for synthetic images")
@@ -177,18 +168,13 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--trust-remote-code", action="store_true", default=False)
     p.add_argument("--attn-implementation", help="eager|sdpa|flash_attention_2")
 
-    # =========================
-    # PROFILING (NEW)
-    # =========================
+    # PROFILING
     p.add_argument(
         "--profile",
         action="store_true",
         default=False,
         help="Enable profiling for sglang backends (HTTP: /start_profile;/stop_profile, offline: torch.profiler)",
     )
-    # NOTE: argparse boolean flags should default=False when action=store_true
-    # If you want default True, then make it store_false with --no-xxx style.
-    # Here we keep your original intention: record_shapes default True.
     p.add_argument(
         "--profile-record-shapes",
         action="store_true",
@@ -223,12 +209,10 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
 
 
 def _norm_paths(args: argparse.Namespace) -> None:
-    # Back-compat: allow --dataset-path to stand in for captions file
     if args.dataset == "flickr8k":
         if not args.flickr8k_captions_file and args.dataset_path:
             args.flickr8k_captions_file = args.dataset_path
         if not args.flickr8k_images_dir and args.dataset_path:
-            # common pattern: captions file under dataset root
             args.flickr8k_images_dir = os.path.dirname(args.dataset_path)
 
 
@@ -253,7 +237,6 @@ def main(argv: Any = None) -> None:
     elif backend in {"sglang-offline", "sglang_offline"}:
         backend_kwargs.update({"tp_size": int(args.tp_size), "dp_size": int(args.dp_size)})
 
-    # Build profile kwargs once (pass-through to chat_with_session -> session.chat)
     profile_kwargs: Dict[str, Any] = {}
     if bool(args.profile):
         acts = _csv_to_list(getattr(args, "profile_activities", "CPU,CUDA"))
@@ -297,7 +280,7 @@ def main(argv: Any = None) -> None:
                     image_paths=args.image,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
-                    profile=False,  # warmup 默认不 profile
+                    profile=False,
                     profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
@@ -345,12 +328,11 @@ def main(argv: Any = None) -> None:
                     image_paths=warm_paths,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
-                    profile=False,  # warmup 默认不 profile
+                    profile=False,
                     profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
 
-        # Timing excludes model/client load; session was created above.
         print(
             f"[vl.run] start timing dataset=flickr8k count={n} batch_size={bs} profile={bool(args.profile)}",
             flush=True,
@@ -397,7 +379,6 @@ def main(argv: Any = None) -> None:
         return
 
     if args.dataset == "synthetic":
-        # Generate random images -> reuse the same batching + timing path
         bs = max(1, int(args.batch_size))
         n = max(0, int(getattr(args, "synthetic_num_images", 0) or 0))
         if n <= 0:
@@ -432,7 +413,7 @@ def main(argv: Any = None) -> None:
                     image_paths=warm_paths,
                     prompt=args.prompt,
                     max_new_tokens=args.max_new_tokens,
-                    profile=False,  # warmup 默认不 profile
+                    profile=False,
                     profile_kwargs=None,
                 )
             print("[vl.warmup] done", flush=True)
@@ -492,7 +473,6 @@ def main(argv: Any = None) -> None:
 
         print(json.dumps(rec, indent=2, ensure_ascii=False))
 
-        # If we used a temp dir, clean it after printing output.
         if tmp_ctx is not None:
             tmp_ctx.cleanup()
         return

@@ -8,7 +8,16 @@ import os
 import sys
 import time
 import math
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, Optional
+
+# Allow running this script directly without installing the package.
+# When executed as `python scripts/embedding/run_embedding.py`, Python adds `scripts/embedding` to sys.path,
+# but not the repository root, so `import src...` would fail.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_repo_root_str = str(_REPO_ROOT)
+if _repo_root_str not in sys.path:
+    sys.path.insert(0, _repo_root_str)
 
 # If output is piped to a command like `head`, stdout may be closed early.
 # Default Python behavior can emit noisy BrokenPipeError messages on exit.
@@ -59,6 +68,7 @@ def _norm_base_url(base_url: str | None) -> str | None:
 def _shape_list(x: Any) -> List[int] | None:
     try:
         import torch
+
         if isinstance(x, torch.Tensor):
             return list(x.shape)
     except Exception:
@@ -67,10 +77,7 @@ def _shape_list(x: Any) -> List[int] | None:
 
 
 def _parse_activities(s: Optional[str]) -> List[str]:
-    """
-    Parse activities string like "CPU,CUDA" into ["CPU","CUDA"].
-    Keep it as strings here; downstream clients decide how to map.
-    """
+    """Parse activities string like "CPU,CUDA" into ["CPU","CUDA"]."""
     if not s:
         return []
     parts = [p.strip() for p in str(s).split(",")]
@@ -80,15 +87,13 @@ def _parse_activities(s: Optional[str]) -> List[str]:
 # -------------------------
 # NEW: synthetic dataset generator
 # -------------------------
+
 def _gen_synthetic_token_texts(
     num_samples: int,
     token_len: int,
     seed: int = 12345,
 ) -> List[str]:
-    """
-    Generate pseudo-token texts like: "w123 w456 ...", aiming for ~token_len tokens.
-    This is tokenizer-agnostic and fast; exact token counts may vary per tokenizer.
-    """
+    """Generate pseudo-token texts like: "w123 w456 ...", aiming for ~token_len tokens."""
     import random
 
     if num_samples <= 0:
@@ -107,12 +112,14 @@ def _gen_synthetic_token_texts(
 def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
     if dataset == "yahoo_answers":
         from src.data import load_yahoo_answers_jsonl
+
         return load_yahoo_answers_jsonl, "text"
 
     if dataset == "synthetic_tokens":
-        # The loader signature is custom: (num_samples, token_len, seed)
+
         def _loader(*, num_samples: int, token_len: int, seed: int) -> List[str]:
             return _gen_synthetic_token_texts(num_samples=num_samples, token_len=token_len, seed=seed)
+
         return _loader, "text"
 
     raise ValueError(f"Unknown dataset: {dataset}")
@@ -135,7 +142,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=-1, help="Maximum samples to load (-1 for all)")
 
     # -------------------------
-    # NEW: Synthetic token dataset options (used when --dataset=synthetic_tokens)
+    # Synthetic token dataset options (used when --dataset=synthetic_tokens)
     # -------------------------
     parser.add_argument(
         "--synthetic-token-len",
@@ -209,7 +216,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     )
 
     # -------------------------
-    # Profiling (new)
+    # Profiling
     # -------------------------
     parser.add_argument(
         "--profile",
@@ -287,7 +294,6 @@ def main(argv: Any = None) -> None:
         **backend_kwargs,
     )
 
-    # Build profile kwargs to pass down.
     profile_enabled = bool(getattr(args, "profile", False))
     profile_kwargs: Dict[str, Any] = {
         "record_shapes": bool(getattr(args, "profile_record_shapes", False)),
@@ -295,7 +301,6 @@ def main(argv: Any = None) -> None:
         "out_dir": str(getattr(args, "profile_out_dir", "") or ""),
         "out_name": str(getattr(args, "profile_out_name", "embedding_profile") or "embedding_profile"),
         "strict": bool(getattr(args, "profile_strict", False)),
-        # Helpful metadata for filenames / traces (optional, your backend may ignore)
         "tag": f"embed_{args.dataset}_{args.backend}",
     }
 
@@ -314,11 +319,9 @@ def main(argv: Any = None) -> None:
             batch_size=min(args.batch_size, max(1, len(warmup_inputs))),
             max_length=args.max_length,
             normalize=args.normalize,
-            # warmup 默认不启 profile（避免污染正式 trace）
             profile=False,
         )
 
-    # Flickr8k branch unchanged
     if args.dataset == "flickr8k":
         from src.data import load_flickr8k
 
@@ -404,12 +407,8 @@ def main(argv: Any = None) -> None:
         print(json.dumps(rec, indent=2, default=str))
         return
 
-    # Default (text-only) datasets
     loader, modality = _get_dataset_loader(args.dataset)
 
-    # -------------------------
-    # NEW: synthetic_tokens branch
-    # -------------------------
     if args.dataset == "synthetic_tokens":
         max_samples = int(args.max_samples)
         if max_samples <= 0:
@@ -485,6 +484,7 @@ def main(argv: Any = None) -> None:
 
     if args.output_path:
         import torch
+
         os.makedirs(os.path.dirname(args.output_path) or ".", exist_ok=True)
         torch.save(result, args.output_path)
         summary["output_path"] = args.output_path
@@ -496,7 +496,6 @@ if __name__ == "__main__":
     try:
         main()
     except BrokenPipeError:
-        # When stdout is closed early (e.g. `| head`), exit quietly.
         try:
             sys.stdout.close()
         except Exception:
