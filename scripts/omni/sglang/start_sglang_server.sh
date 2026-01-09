@@ -39,7 +39,7 @@ WORK_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 echo "WORK_HOME=$WORK_HOME"
 
 # ===== 环境路径 =====
-export CONDA_PREFIX="/root/miniforge3/envs/xtang-embedding-cpu"
+export CONDA_PREFIX="/root/miniforge3/envs/sglang-cpu4omni"
 if [[ "${DEVICE}" == "cpu" ]]; then
   export SGLANG_USE_CPU_ENGINE=1
 fi
@@ -61,6 +61,9 @@ export MALLOC_ARENA_MAX=1
 BATCH_SIZE=16
 echo "Batch size = $BATCH_SIZE"
 
+export SGLANG_USE_CPU_ENGINE=1 
+export SGLANG_VLM_CACHE_SIZE_MB=1000 
+
 python -m sglang.launch_server \
   --model-path "$MODEL_DIR" \
   --tokenizer-path "$MODEL_DIR" \
@@ -76,4 +79,8 @@ python -m sglang.launch_server \
   --attention-backend intel_amx \
   --enable-tokenizer-batch-encode \
   --log-level error \
-  --disable-fast-image-processor
+  --disable-fast-image-processor \
+  --mem-fraction-static 0.8 \
+  --max-total-tokens 65536 \
+  --disable-radix-cache \
+  --enable-multimodal  

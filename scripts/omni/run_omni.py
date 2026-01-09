@@ -22,10 +22,12 @@ if _repo_root_str not in sys.path:
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 OMNI_MODELS: List[str] = [
+    "qwen2.5-omni-3b",
     "qwen2.5-omni-7b",
 ]
 
 MODEL_ID_MAP: Dict[str, str] = {
+    "qwen2.5-omni-3b": "Qwen/Qwen2.5-Omni-3B",
     "qwen2.5-omni-7b": "Qwen/Qwen2.5-Omni-7B",
 }
 
@@ -105,6 +107,7 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--synthetic-num-images", type=int, default=10)
     p.add_argument("--synthetic-seed", type=int, default=1234)
     p.add_argument("--synthetic-out-dir", default="")
+    p.add_argument("--batch-size", type=int, default=1, help="Batch size for synthetic runs (group images per call)")
 
     # runtime
     p.add_argument("--max-new-tokens", type=int, default=128)
@@ -171,6 +174,7 @@ def main(argv: Any = None) -> None:
         image_transport=args.image_transport,
         device=args.device,
         dtype=args.dtype,
+        served_model=(args.model if (args.backend or "").lower() in {"vllm-http"} else ""),
         **backend_kwargs,
     )
 
@@ -216,6 +220,10 @@ def main(argv: Any = None) -> None:
         n = int(getattr(args, "synthetic_num_images", 0) or 0)
         if n <= 0:
             raise ValueError("--synthetic-num-images must be > 0")
+
+        batch_size = int(getattr(args, "batch_size", 1) or 1)
+        if batch_size <= 0:
+            raise ValueError("--batch-size must be > 0")
         h, w = _parse_hw(getattr(args, "synthetic_image_size", "224x224"))
 
         out_dir = str(getattr(args, "synthetic_out_dir", "") or "").strip()
@@ -232,18 +240,30 @@ def main(argv: Any = None) -> None:
 
         t0 = time.time()
         outs: List[str] = []
-        for pth in image_paths:
-            outs.extend(_run_once([pth]))
+        num_batches = 0
+        for i in range(0, len(image_paths), batch_size):
+            batch = image_paths[i : i + batch_size]
+            num_batches += 1
+            outs.extend(_run_once(batch))
         t1 = time.time()
+
+        total_time = (t1 - t0)
+        count = len(image_paths)
+        time_per_batch = (total_time / num_batches) if num_batches > 0 else float("inf")
+        time_per_sample = (total_time / count) if count > 0 else float("inf")
 
         print(
             json.dumps(
                 {
                     "dataset": "synthetic",
-                    "count": len(image_paths),
+                    "count": count,
                     "image_size": f"{h}x{w}",
-                    "time_sec": (t1 - t0),
-                    "samples_per_sec": (len(image_paths) / (t1 - t0)) if (t1 - t0) > 0 else float("inf"),
+                    "batch_size": batch_size,
+                    "num_batches": num_batches,
+                    "time_sec": total_time,
+                    "time_sec_per_batch": time_per_batch,
+                    "time_sec_per_sample": time_per_sample,
+                    "samples_per_sec": (count / total_time) if total_time > 0 else float("inf"),
                     "model_id": model_id,
                     "backend": args.backend,
                     "synthetic_out_dir": out_dir,

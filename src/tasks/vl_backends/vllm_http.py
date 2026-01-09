@@ -79,6 +79,10 @@ def _extract_chat_text(resp: Dict[str, Any]) -> str:
     return str(resp)
 
 
+class _NonRetryableHTTPError(RuntimeError):
+    pass
+
+
 class VLLMHTTPVLClient:
     """OpenAI-compatible VL chat client for vLLM OpenAI servers."""
 
@@ -118,11 +122,28 @@ class VLLMHTTPVLClient:
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = self.session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    # Try to surface the OpenAI-style error payload when present.
+                    err_msg = resp.text
+                    try:
+                        j = resp.json()
+                        if isinstance(j, dict):
+                            e = j.get("error")
+                            if isinstance(e, dict) and e.get("message"):
+                                err_msg = str(e.get("message"))
+                    except Exception:
+                        pass
+
+                    # Don't retry on typical client/config errors.
+                    if resp.status_code in {400, 401, 403, 404, 409, 422}:
+                        raise _NonRetryableHTTPError(f"vLLM HTTP chat failed ({resp.status_code}): {err_msg}")
+                    resp.raise_for_status()
                 data = resp.json()
                 if not isinstance(data, dict):
                     raise RuntimeError(f"Unexpected response type: {type(data)}")
                 return data
+            except _NonRetryableHTTPError:
+                raise
             except Exception as e:  # pragma: no cover - network
                 last_err = e
                 if attempt >= self.max_retries:

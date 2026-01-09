@@ -36,6 +36,11 @@ def load_omni_session(
 
     backend = (backend_name or "sglang").lower()
 
+    # For HTTP servers (sglang/vLLM OpenAI-compatible), the `model` field in the request is
+    # typically the served model name, not the local HF path. Allow callers to override.
+    served_model = str(kwargs.pop("served_model", "") or "")
+    http_model = served_model or model_id
+
     if backend in {"sglang", "sglang-http"}:
         from .omni_backends.sglang_http import SGLangHTTPOMNIClient
 
@@ -43,7 +48,7 @@ def load_omni_session(
             raise ValueError("base_url is required for backend=sglang")
         sess = SGLangHTTPOMNIClient(
             base_url=base_url,
-            model=model_id,
+            model=http_model,
             api_key=api_key,
             timeout=timeout,
             image_transport=image_transport,
@@ -58,7 +63,7 @@ def load_omni_session(
             raise ValueError("base_url is required for backend=vllm-http")
         return VLLMHTTPOMNIClient(
             base_url=base_url,
-            model=model_id,
+            model=http_model,
             api_key=api_key,
             timeout=timeout,
             image_transport=image_transport,

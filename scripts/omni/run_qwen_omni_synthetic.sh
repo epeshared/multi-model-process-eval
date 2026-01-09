@@ -14,6 +14,7 @@ set -euo pipefail
 #   SYNTHETIC_NUM_IMAGES (default: 50)
 #   SYNTHETIC_SEED (default: 1234)
 #   SYNTHETIC_OUT_DIR (default: "")  # empty => temp dir created by run_omni.py
+#   BATCH_SIZE (default: 1)  # group images per call (best-effort; backend-dependent)
 #
 # Runtime:
 #   MAX_NEW_TOKENS (default: 128)
@@ -48,8 +49,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
-MODEL=${MODEL:-qwen2.5-omni-7b}
-MODEL_ID=${MODEL_ID:-/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-Omni-7B}
+MODEL=${MODEL:-qwen2.5-omni-3b}
+MODEL_ID=${MODEL_ID:-/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-Omni-3B}
 BACKEND=${BACKEND:-sglang}
 PROMPT=${PROMPT:-"Describe the image."}
 
@@ -66,12 +67,14 @@ DEVICE=${DEVICE:-}
 DTYPE=${DTYPE:-auto}
 
 SYNTHETIC_IMAGE_SIZE=${SYNTHETIC_IMAGE_SIZE:-224x224}
-SYNTHETIC_NUM_IMAGES=${SYNTHETIC_NUM_IMAGES:-50}
+SYNTHETIC_NUM_IMAGES=${SYNTHETIC_NUM_IMAGES:-10}
 SYNTHETIC_SEED=${SYNTHETIC_SEED:-1234}
 SYNTHETIC_OUT_DIR=${SYNTHETIC_OUT_DIR:-}
 
+BATCH_SIZE=${BATCH_SIZE:-1}
+
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-128}
-WARMUP=${WARMUP:-0}
+WARMUP=${WARMUP:-1}
 
 PROFILE=${PROFILE:-0}
 PROFILE_RECORD_SHAPES=${PROFILE_RECORD_SHAPES:-true}
@@ -149,6 +152,7 @@ echo "[run_qwen_omni_synthetic] SYNTHETIC_IMAGE_SIZE=${SYNTHETIC_IMAGE_SIZE}"
 echo "[run_qwen_omni_synthetic] SYNTHETIC_NUM_IMAGES=${SYNTHETIC_NUM_IMAGES}"
 echo "[run_qwen_omni_synthetic] SYNTHETIC_SEED=${SYNTHETIC_SEED}"
 echo "[run_qwen_omni_synthetic] SYNTHETIC_OUT_DIR=${SYNTHETIC_OUT_DIR:-<tmp>}"
+echo "[run_qwen_omni_synthetic] BATCH_SIZE=${BATCH_SIZE}"
 echo "[run_qwen_omni_synthetic] MAX_NEW_TOKENS=${MAX_NEW_TOKENS}"
 echo "[run_qwen_omni_synthetic] WARMUP=${WARMUP}"
 echo "[run_qwen_omni_synthetic] PROFILE=${PROFILE}"
@@ -173,6 +177,7 @@ python scripts/omni/run_omni.py \
   --synthetic-image-size "${SYNTHETIC_IMAGE_SIZE}" \
   --synthetic-num-images "${SYNTHETIC_NUM_IMAGES}" \
   --synthetic-seed "${SYNTHETIC_SEED}" \
+  --batch-size "${BATCH_SIZE}" \
   "${SYNTHETIC_OUT_DIR_ARG[@]}" \
   --prompt "${PROMPT}" \
   --max-new-tokens "${MAX_NEW_TOKENS}" \
@@ -183,7 +188,6 @@ python scripts/omni/run_omni.py \
   --timeout "${TIMEOUT}" \
   --image-transport "${IMAGE_TRANSPORT}" \
   --tp-size "${TP_SIZE}" \
-  --max-model-len "${MAX_MODEL_LEN}" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \
