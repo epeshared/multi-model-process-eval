@@ -29,3 +29,56 @@ MODEL=qwen3-1.7b MODEL_ID=/mnt/models/Qwen/Qwen3-1.7B BACKEND=sglang BASE_URL=ht
 # Tune synthetic dataset
 SYNTHETIC_NUM_PROMPTS=50 SYNTHETIC_TOKEN_LEN=64 BATCH_SIZE=2 MAX_NEW_TOKENS=128 ./run_qwen3_test.sh
 ```
+
+## TTFT / TPOT
+
+This repo prints TTFT/TPOT in `scripts/qwen3/run_qwen3_test.sh` (two extra summary lines) and also includes them in the JSON output from `scripts/qwen3/run_qwen3.py`.
+
+### Definitions
+
+- **TTFT (Time To First Token, seconds)**
+	- Measured client-side using OpenAI-compatible **streaming** (`stream=true`).
+	- Definition: wall-clock time from sending the HTTP request until receiving the first non-empty `delta.content` chunk.
+
+- **TPOT (Time Per Output Token, seconds/token)**
+	- Computed per request as:
+    
+		$$\text{TPOT} = \frac{\text{total\_sec} - \text{ttft\_sec}}{\max(1,\ \text{completion\_tokens} - 1)}$$
+	- Requires the server to provide `usage.completion_tokens` (best-effort via `stream_options={"include_usage": true}` when streaming).
+	- If `completion_tokens` is missing, TPOT is reported as `null`.
+
+### What gets printed
+
+- For `--dataset=synthetic`:
+	- `ttft_sec_avg`: average of per-prompt TTFT
+	- `tpot_sec_per_token_avg`: average of per-prompt TPOT
+- For `--dataset=single`:
+	- `ttft_sec`, `tpot_sec_per_token`
+
+### Call flow (where the numbers come from)
+
+1. `scripts/qwen3/run_qwen3_test.sh`
+	 - Runs `python scripts/qwen3/run_qwen3.py ...` and captures its JSON output.
+	 - Extracts `ttft_sec_avg`/`tpot_sec_per_token_avg` (or the single-run keys) and prints:
+		 - `[run_qwen3_test] TTFT_sec=...`
+		 - `[run_qwen3_test] TPOT_sec_per_token=...`
+
+2. `scripts/qwen3/run_qwen3.py`
+	 - Generates a synthetic text dataset (pseudo tokens like `w123 w456 ...`).
+	 - Calls `src/tasks/qwen3.py:load_qwen3_session(...)` to build a reusable session.
+	 - For each prompt (or prompt batch) it calls `session.chat_with_metrics(...)` when available.
+	 - Aggregates TTFT/TPOT across prompts and prints a JSON summary.
+
+3. HTTP clients (actual timing)
+	 - SGLang: `src/tasks/qwen3_backends/sglang_http.py`
+	 - vLLM: `src/tasks/qwen3_backends/vllm_http.py`
+	 - Both implement an OpenAI-compatible SSE parser:
+		 - Start timer at request start
+		 - Set TTFT when the first `delta.content` arrives
+		 - Track `usage` if the server sends it during streaming
+
+### Notes / caveats
+
+- TTFT/TPOT are **client-observed** metrics and include network + server queueing + decode time.
+- If you disable streaming (`--no-stream`), TTFT will be `null` (no per-token timestamps).
+- Some server versions do not stream `usage`; TPOT may be `null` even when TTFT exists.
