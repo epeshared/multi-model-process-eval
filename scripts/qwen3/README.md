@@ -1,6 +1,6 @@
 # Qwen3 test scripts
 
-- `run_qwen3_test.sh`: Run Qwen3 model tests for 0.6B, 1.7B, 4B sizes.
+- `run_qwen3_test.sh`: Synthetic text stress-test for Qwen3 via `scripts/qwen3/run_qwen3.py`.
 
 ## Start servers
 
@@ -20,7 +20,12 @@ MODEL_DIR=/path/to/Qwen3-1.7B ./start_sglang_server_cuda.sh
 
 ## Usage
 ```bash
-MODEL_DIR=/mnt/models/Qwen/Qwen3-0.6B ./run_qwen3_test.sh 0.6B
-MODEL_DIR=/mnt/models/Qwen/Qwen3-1.7B ./run_qwen3_test.sh 1.7B
-MODEL_DIR=/mnt/models/Qwen/Qwen3-4B ./run_qwen3_test.sh 4B
+# vLLM HTTP (default)
+MODEL=qwen3-0.6b MODEL_ID=/mnt/models/Qwen/Qwen3-0.6B BASE_URL=http://127.0.0.1:8000 ./run_qwen3_test.sh
+
+# SGLang HTTP
+MODEL=qwen3-1.7b MODEL_ID=/mnt/models/Qwen/Qwen3-1.7B BACKEND=sglang BASE_URL=http://127.0.0.1:30000 ./run_qwen3_test.sh
+
+# Tune synthetic dataset
+SYNTHETIC_NUM_PROMPTS=50 SYNTHETIC_TOKEN_LEN=64 BATCH_SIZE=2 MAX_NEW_TOKENS=128 ./run_qwen3_test.sh
 ```
