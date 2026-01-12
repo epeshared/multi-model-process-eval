@@ -82,7 +82,49 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
     p.add_argument("--api-key", default="")
     p.add_argument("--timeout", type=float, default=600.0)
 
+    # Timing
+    p.add_argument(
+        "--stream",
+        action="store_true",
+        default=True,
+        help="Use streaming chat for HTTP backends when possible (enables TTFT measurement).",
+    )
+    p.add_argument(
+        "--no-stream",
+        dest="stream",
+        action="store_false",
+        help="Disable streaming chat; TTFT will be null (or approximated).",
+    )
+
     return p.parse_args(argv)
+
+
+def _safe_mean(xs: List[float]) -> Optional[float]:
+    if not xs:
+        return None
+    return sum(xs) / float(len(xs))
+
+
+def _tpot_from_metrics(m: Dict[str, Any]) -> Optional[float]:
+    """Compute TPOT (sec/token) from a single request metrics dict.
+
+    Definition used here:
+      TPOT = (total_sec - ttft_sec) / max(1, completion_tokens - 1)
+
+    Requires server to provide usage.completion_tokens (best-effort).
+    """
+    try:
+        ttft = m.get("ttft_sec")
+        total = m.get("total_sec")
+        usage = m.get("usage") or {}
+        comp = usage.get("completion_tokens")
+        if ttft is None or total is None or comp is None:
+            return None
+        comp = int(comp)
+        denom = max(1, comp - 1)
+        return (float(total) - float(ttft)) / float(denom)
+    except Exception:
+        return None
 
 
 def main(argv: Any = None) -> None:
@@ -105,7 +147,31 @@ def main(argv: Any = None) -> None:
     warmup = max(0, int(getattr(args, "warmup", 0) or 0))
 
     def _run_batch(prompts: List[str]) -> List[str]:
+        # Prefer timing-aware path when available.
+        if hasattr(session, "chat_with_metrics"):
+            outs, _ = session.chat_with_metrics(
+                prompts=prompts,
+                max_new_tokens=int(args.max_new_tokens),
+                stream=bool(getattr(args, "stream", True)),
+            )
+            return outs
         return chat_with_session(session, prompt=prompts, max_new_tokens=int(args.max_new_tokens))
+
+    def _run_batch_with_metrics(prompts: List[str]) -> tuple[List[str], List[Dict[str, Any]]]:
+        if hasattr(session, "chat_with_metrics"):
+            outs, ms = session.chat_with_metrics(
+                prompts=prompts,
+                max_new_tokens=int(args.max_new_tokens),
+                stream=bool(getattr(args, "stream", True)),
+            )
+            return outs, ms
+
+        # Fallback: no TTFT; only total time for the batch wrapper.
+        t0 = time.time()
+        outs = chat_with_session(session, prompt=prompts, max_new_tokens=int(args.max_new_tokens))
+        t1 = time.time()
+        ms = [{"ttft_sec": None, "total_sec": (t1 - t0), "usage": {}} for _ in outs]
+        return outs, ms
 
     if args.dataset == "single":
         if warmup > 0:
@@ -113,8 +179,10 @@ def main(argv: Any = None) -> None:
                 _ = _run_batch([args.prompt])
 
         t0 = time.time()
-        out = _run_batch([args.prompt])
+        out, ms = _run_batch_with_metrics([args.prompt])
         t1 = time.time()
+        m0 = ms[0] if ms else {"ttft_sec": None, "total_sec": (t1 - t0), "usage": {}}
+        tpot = _tpot_from_metrics(m0)
         print(
             json.dumps(
                 {
@@ -122,6 +190,9 @@ def main(argv: Any = None) -> None:
                     "model_id": model_id,
                     "backend": args.backend,
                     "time_sec": (t1 - t0),
+                    "ttft_sec": m0.get("ttft_sec"),
+                    "tpot_sec_per_token": tpot,
+                    "usage": m0.get("usage", {}),
                     "outputs": out,
                 },
                 indent=2,
@@ -150,17 +221,23 @@ def main(argv: Any = None) -> None:
 
         t0 = time.time()
         outs: List[str] = []
+        all_metrics: List[Dict[str, Any]] = []
         num_batches = 0
         for i in range(0, len(prompts), batch_size):
             batch = prompts[i : i + batch_size]
             num_batches += 1
-            outs.extend(_run_batch(batch))
+            o, ms = _run_batch_with_metrics(batch)
+            outs.extend(o)
+            all_metrics.extend(ms)
         t1 = time.time()
 
         total_time = (t1 - t0)
         count = len(prompts)
         time_per_batch = (total_time / num_batches) if num_batches > 0 else float("inf")
         time_per_sample = (total_time / count) if count > 0 else float("inf")
+
+        ttfts = [float(m["ttft_sec"]) for m in all_metrics if m.get("ttft_sec") is not None]
+        tpots = [float(x) for x in (_tpot_from_metrics(m) for m in all_metrics) if x is not None]
 
         print(
             json.dumps(
@@ -175,6 +252,8 @@ def main(argv: Any = None) -> None:
                     "time_sec": total_time,
                     "time_per_batch_sec": time_per_batch,
                     "time_per_sample_sec": time_per_sample,
+                    "ttft_sec_avg": _safe_mean(ttfts),
+                    "tpot_sec_per_token_avg": _safe_mean(tpots),
                     "outputs_preview": outs[: min(3, len(outs))],
                 },
                 indent=2,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import time
+import json
 
 try:
     import requests  # type: ignore
@@ -106,6 +107,97 @@ class Qwen3VLLMHTTPClient:
                 time.sleep(self.backoff * (2 ** (attempt - 1)))
         raise RuntimeError(f"vLLM HTTP chat failed after {self.max_retries} attempts: {last_err}")
 
+    def _post_chat_stream(self, payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Stream OpenAI-compatible chat completion and return (text, metrics).
+
+        Metrics contains:
+          - ttft_sec: seconds until first non-empty delta token
+          - total_sec: total request wall time
+          - usage: usage dict if server includes it (best-effort)
+        """
+
+        url = _v1_chat_url(self.base_url)
+        last_err: Optional[Exception] = None
+
+        for attempt in range(1, self.max_retries + 1):
+            started = time.time()
+            ttft_sec: Optional[float] = None
+            text_parts: List[str] = []
+            usage: Dict[str, Any] = {}
+            try:
+                with self.session.post(
+                    url,
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=self.timeout,
+                    stream=True,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        err_msg = resp.text
+                        try:
+                            j = resp.json()
+                            if isinstance(j, dict):
+                                e = j.get("error")
+                                if isinstance(e, dict) and e.get("message"):
+                                    err_msg = str(e.get("message"))
+                        except Exception:
+                            pass
+                        if resp.status_code in {400, 401, 403, 404, 409, 422}:
+                            raise _NonRetryableHTTPError(f"vLLM HTTP chat failed ({resp.status_code}): {err_msg}")
+                        resp.raise_for_status()
+
+                    for raw_line in resp.iter_lines(decode_unicode=True):
+                        if not raw_line:
+                            continue
+                        line = raw_line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[len("data:") :].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            evt = json.loads(data_str)
+                        except Exception:
+                            continue
+                        if not isinstance(evt, dict):
+                            continue
+
+                        # Some servers may include usage in-stream (when stream_options.include_usage is on)
+                        u = evt.get("usage")
+                        if isinstance(u, dict):
+                            usage = u
+
+                        choices = evt.get("choices")
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        delta = (choices[0] or {}).get("delta")
+                        if not isinstance(delta, dict):
+                            continue
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            if ttft_sec is None:
+                                ttft_sec = time.time() - started
+                            text_parts.append(piece)
+
+                total_sec = time.time() - started
+                return (
+                    "".join(text_parts),
+                    {
+                        "ttft_sec": ttft_sec,
+                        "total_sec": total_sec,
+                        "usage": usage,
+                    },
+                )
+            except _NonRetryableHTTPError:
+                raise
+            except Exception as e:  # pragma: no cover - network
+                last_err = e
+                if attempt >= self.max_retries:
+                    break
+                time.sleep(self.backoff * (2 ** (attempt - 1)))
+
+        raise RuntimeError(f"vLLM HTTP stream chat failed after {self.max_retries} attempts: {last_err}")
+
     def chat(
         self,
         *,
@@ -113,9 +205,46 @@ class Qwen3VLLMHTTPClient:
         max_new_tokens: int = 128,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        stream: bool = False,
         **kwargs: Any,
     ) -> List[str]:
         outs: List[str] = []
+        for prompt in prompts:
+            messages = [{"role": "user", "content": str(prompt)}]
+            payload: Dict[str, Any] = {
+                "model": self.model or "default",
+                "messages": messages,
+                "max_tokens": int(max_new_tokens),
+            }
+            if bool(stream):
+                payload["stream"] = True
+                # Best-effort: ask server to include usage while streaming.
+                payload["stream_options"] = {"include_usage": True}
+            if temperature is not None:
+                payload["temperature"] = float(temperature)
+            if top_p is not None:
+                payload["top_p"] = float(top_p)
+            payload.update(kwargs)
+            if bool(stream):
+                text, _ = self._post_chat_stream(payload)
+                outs.append(text)
+            else:
+                data = self._post_chat(payload)
+                outs.append(_extract_chat_text(data))
+        return outs
+
+    def chat_with_metrics(
+        self,
+        *,
+        prompts: Sequence[str],
+        max_new_tokens: int = 128,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        stream: bool = True,
+        **kwargs: Any,
+    ) -> tuple[List[str], List[Dict[str, Any]]]:
+        outs: List[str] = []
+        metrics: List[Dict[str, Any]] = []
         for prompt in prompts:
             messages = [{"role": "user", "content": str(prompt)}]
             payload: Dict[str, Any] = {
@@ -128,6 +257,19 @@ class Qwen3VLLMHTTPClient:
             if top_p is not None:
                 payload["top_p"] = float(top_p)
             payload.update(kwargs)
-            data = self._post_chat(payload)
-            outs.append(_extract_chat_text(data))
-        return outs
+
+            if bool(stream):
+                payload["stream"] = True
+                payload["stream_options"] = {"include_usage": True}
+                text, m = self._post_chat_stream(payload)
+                outs.append(text)
+                metrics.append(m)
+            else:
+                t0 = time.time()
+                data = self._post_chat(payload)
+                t1 = time.time()
+                outs.append(_extract_chat_text(data))
+                u = data.get("usage") if isinstance(data, dict) else None
+                metrics.append({"ttft_sec": None, "total_sec": (t1 - t0), "usage": (u if isinstance(u, dict) else {})})
+
+        return outs, metrics

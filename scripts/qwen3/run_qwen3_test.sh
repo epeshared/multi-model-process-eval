@@ -65,7 +65,7 @@ echo "[run_qwen3_test] BATCH_SIZE=${BATCH_SIZE}"
 echo "[run_qwen3_test] MAX_NEW_TOKENS=${MAX_NEW_TOKENS}"
 echo "[run_qwen3_test] WARMUP=${WARMUP}"
 
-python scripts/qwen3/run_qwen3.py \
+RESULT_JSON=$(python scripts/qwen3/run_qwen3.py \
 	--model "${MODEL}" \
 	--model-id "${MODEL_ID}" \
 	--backend "${BACKEND}" \
@@ -79,4 +79,32 @@ python scripts/qwen3/run_qwen3.py \
 	--warmup "${WARMUP}" \
 	--base-url "${BASE_URL}" \
 	--api-key "${API_KEY}" \
-	--timeout "${TIMEOUT}"
+	--timeout "${TIMEOUT}")
+
+echo "${RESULT_JSON}"
+
+# Print TTFT/TPOT summary if present in output JSON.
+python - <<'PY'
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+j = json.loads(raw)
+
+ttft = j.get("ttft_sec_avg", j.get("ttft_sec"))
+tpot = j.get("tpot_sec_per_token_avg", j.get("tpot_sec_per_token"))
+
+def _fmt(x):
+    if x is None:
+        return "null"
+    try:
+        return f"{float(x):.6f}"
+    except Exception:
+        return str(x)
+
+print(f"[run_qwen3_test] TTFT_sec={_fmt(ttft)}")
+print(f"[run_qwen3_test] TPOT_sec_per_token={_fmt(tpot)}")
+PY
+<<<"${RESULT_JSON}"
