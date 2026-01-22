@@ -23,10 +23,12 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 VL_MODELS: List[str] = [
     "qwen2.5-vl-7b-instruct",
+    "qwen2.5-vl-3b-instruct",
 ]
 
 MODEL_ID_MAP: Dict[str, str] = {
     "qwen2.5-vl-7b-instruct": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "qwen2.5-vl-3b-instruct": "Qwen/Qwen2.5-VL-3B-Instruct",
 }
 
 VL_BACKENDS: List[str] = [

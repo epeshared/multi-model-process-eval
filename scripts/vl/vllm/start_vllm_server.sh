@@ -113,13 +113,13 @@ python -m vllm.entrypoints.openai.api_server
   --model "$MODEL_DIR"
   --served-model-name "$SERVED_MODEL_NAME"
   --trust-remote-code
-  "${CUDA_GRAPH_ARG[@]}"
+  --enable-cuda-graph
   --host "$HOST"
   --port "$PORT"
   --tensor-parallel-size "$TP"
   --max-model-len "$MAX_MODEL_LEN"
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
-  --dtype "$DTYPE"
+  --dtype float16
 )
 
 if [[ -n "$LIMIT_MM_PER_PROMPT_IMAGE" ]]; then
