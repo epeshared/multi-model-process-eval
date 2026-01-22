@@ -66,7 +66,7 @@ echo "WORK_HOME=$WORK_HOME"
 ###############################################
 #        ✅ 仅需在这里配置模型路径即可
 ###############################################
-MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding"}
+MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"}
 ###############################################
 echo "Using model: $MODEL_DIR"
 

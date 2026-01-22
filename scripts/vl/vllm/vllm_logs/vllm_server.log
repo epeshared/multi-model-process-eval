@@ -1,0 +1,157 @@
+INFO 01-22 11:26:35 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 01-22 11:26:35 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:26:36 [api_server.py:1351] vLLM API server version 0.13.0
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:26:36 [utils.py:253] non-default args: {'host': '0.0.0.0', 'port': 30000, 'model': '/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct', 'trust_remote_code': True, 'max_model_len': 8192, 'served_model_name': ['/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct']}
+[0;36m(APIServer pid=360918)[0;0m The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:26:36 [model.py:514] Resolved architecture: Qwen2_5_VLForConditionalGeneration
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:26:36 [model.py:1661] Using max model len 8192
+[0;36m(APIServer pid=360918)[0;0m WARNING 01-22 11:26:36 [cpu.py:157] VLLM_CPU_KVCACHE_SPACE not set. Using 377.64 GiB for KV cache.
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:26:36 [scheduler.py:230] Chunked prefill is enabled with max_num_batched_tokens=2048.
+INFO 01-22 11:26:41 [importing.py:44] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+INFO 01-22 11:26:41 [importing.py:68] Triton not installed or not compatible; certain GPU-related functions will not be available.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:42 [core.py:93] Initializing a V1 LLM engine (v0.13.0) with config: model='/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct', speculative_config=None, tokenizer='/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, kv_cache_dtype=auto, device_config=cpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False), seed=0, served_model_name=/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.DYNAMO_TRACE_ONCE: 2>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'dce': True, 'size_asserts': False, 'nan_asserts': False, 'epilogue_fusion': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False}, 'local_cache_dir': None}
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:180] auto thread-binding list (id, physical core): [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (10, 10), (11, 11), (12, 12), (13, 13), (14, 14), (15, 15), (16, 16), (17, 17), (18, 18), (19, 19), (20, 20), (21, 21), (22, 22), (23, 23), (24, 24), (25, 25), (26, 26), (27, 27), (28, 28), (29, 29), (30, 30), (31, 31), (32, 32), (33, 33), (34, 34), (35, 35), (36, 36), (37, 37), (38, 38), (39, 39), (40, 40), (41, 41), (42, 42), (43, 43), (44, 44), (45, 45), (46, 46), (47, 47), (48, 48), (49, 49), (50, 50), (51, 51), (52, 52), (53, 53), (54, 54), (55, 55), (56, 56), (57, 57), (58, 58), (59, 59), (60, 60), (61, 61), (62, 62), (63, 63)]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] OMP threads binding of Process 361084:
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361084, core 0
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361326, core 1
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361327, core 2
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361328, core 3
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361329, core 4
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361330, core 5
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361331, core 6
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361332, core 7
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361333, core 8
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361334, core 9
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361335, core 10
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361336, core 11
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361337, core 12
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361338, core 13
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361339, core 14
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361340, core 15
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361341, core 16
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361342, core 17
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361343, core 18
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361344, core 19
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361345, core 20
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361346, core 21
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361347, core 22
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361348, core 23
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361349, core 24
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361350, core 25
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361351, core 26
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361352, core 27
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361353, core 28
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361354, core 29
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361355, core 30
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361356, core 31
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361357, core 32
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361358, core 33
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361359, core 34
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361360, core 35
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361361, core 36
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361362, core 37
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361363, core 38
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361364, core 39
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361365, core 40
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361366, core 41
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361367, core 42
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361368, core 43
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361369, core 44
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361370, core 45
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361371, core 46
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361372, core 47
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361373, core 48
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361374, core 49
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361375, core 50
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361376, core 51
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361377, core 52
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361378, core 53
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361379, core 54
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361380, core 55
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361381, core 56
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361382, core 57
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361383, core 58
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361384, core 59
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361385, core 60
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361386, core 61
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361387, core 62
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 	OMP tid: 361388, core 63
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [cpu_worker.py:86] 
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [parallel_state.py:1203] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.16.116.208:45323 backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:43 [parallel_state.py:1411] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0
+[0;36m(EngineCore_DP0 pid=361084)[0;0m The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:46 [cpu_model_runner.py:55] Starting to load model /mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct...
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:46 [interface.py:266] Using default backend AttentionBackendEnum.TORCH_SDPA for vit attention
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:46 [mm_encoder_attention.py:104] Using AttentionBackendEnum.TORCH_SDPA for MMEncoderAttention.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m WARNING 01-22 11:26:46 [vllm.py:629] Inductor compilation was disabled by user settings,Optimizations settings that are only active duringInductor compilation will be ignored.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m WARNING 01-22 11:26:46 [cpu.py:157] VLLM_CPU_KVCACHE_SPACE not set. Using 377.64 GiB for KV cache.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:00<00:01,  2.83it/s]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:01<00:03,  1.01s/it]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:03<00:02,  1.23s/it]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:04<00:01,  1.33s/it]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:07<00:00,  1.66s/it]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:07<00:00,  1.41s/it]
+[0;36m(EngineCore_DP0 pid=361084)[0;0m 
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:53 [default_loader.py:308] Loading weights took 7.09 seconds
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:55 [kv_cache_utils.py:1291] GPU KV cache size: 7,070,976 tokens
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:26:55 [kv_cache_utils.py:1296] Maximum concurrency for 8,192 tokens per request: 863.16x
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:27:25 [cpu_model_runner.py:65] Warming up model for the compilation...
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:30:39 [cpu_model_runner.py:75] Warming up done.
+[0;36m(EngineCore_DP0 pid=361084)[0;0m INFO 01-22 11:30:39 [core.py:259] init engine (profile, create kv cache, warmup model) took 224.44 seconds
+[0;36m(EngineCore_DP0 pid=361084)[0;0m WARNING 01-22 11:30:40 [vllm.py:629] Inductor compilation was disabled by user settings,Optimizations settings that are only active duringInductor compilation will be ignored.
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [api_server.py:1099] Supported tasks: ['generate']
+[0;36m(APIServer pid=360918)[0;0m WARNING 01-22 11:30:40 [model.py:1487] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [serving_responses.py:201] Using default chat sampling params from model: {'repetition_penalty': 1.05, 'temperature': 1e-06}
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [serving_chat.py:137] Using default chat sampling params from model: {'repetition_penalty': 1.05, 'temperature': 1e-06}
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [serving_completion.py:77] Using default completion sampling params from model: {'repetition_penalty': 1.05, 'temperature': 1e-06}
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [serving_chat.py:137] Using default chat sampling params from model: {'repetition_penalty': 1.05, 'temperature': 1e-06}
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [api_server.py:1425] Starting vLLM API server 0 on http://0.0.0.0:30000
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:38] Available routes are:
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /docs, Methods: GET, HEAD
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /tokenize, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /detokenize, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /pause, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /resume, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /is_paused, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /metrics, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /health, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /load, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/models, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /version, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/responses, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/messages, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/completions, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/audio/transcriptions, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/audio/translations, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /ping, Methods: GET
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /ping, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /invocations, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /classify, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/embeddings, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /score, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/score, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /rerank, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v1/rerank, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /v2/rerank, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO 01-22 11:30:40 [launcher.py:46] Route: /pooling, Methods: POST
+[0;36m(APIServer pid=360918)[0;0m INFO:     Started server process [360918]
+[0;36m(APIServer pid=360918)[0;0m INFO:     Waiting for application startup.
+[0;36m(APIServer pid=360918)[0;0m INFO:     Application startup complete.

@@ -44,7 +44,7 @@ BACKEND=${BACKEND:-sglang}
 # - offline backends expect a local model path
 # - vllm-http expects the served model name (the `model` string used in /v1/embeddings)
 if [[ "${MODEL}" == "youtu-embedding" ]]; then
-  YOUTU_MODEL_DIR_DEFAULT="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding"
+  YOUTU_MODEL_DIR_DEFAULT="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"
   YOUTU_VLLM_SERVED_MODEL_NAME_DEFAULT="sn-large-multi-language-v0.2.5"
   MODEL_ID="${MODEL_ID:-}"
   if [[ -z "${MODEL_ID}" ]]; then
@@ -66,7 +66,7 @@ BATCH_SIZE=${BATCH_SIZE:-100}
 DEVICE=${DEVICE:-cpu}
 DTYPE=${DTYPE:-bfloat16}
 USE_AMX=${USE_AMX:-TRUE}
-BASE_URL=${BASE_URL:-http://127.0.0.1:30000}
+BASE_URL=${BASE_URL:-http://127.0.0.1:9090}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 

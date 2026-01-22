@@ -14,10 +14,6 @@ try:  # AMX/ipex optional
 except Exception:  # pragma: no cover - optional dependency
     IPEX_AVAILABLE = False
 
-from .embedding_backends.sglang_http import SGLangHTTPEmbeddingClient
-from .embedding_backends.sglang_offline import SGLangOfflineEmbeddingClient
-from .embedding_backends.vllm_http import VLLMHTTPEmbeddingClient
-from .embedding_backends.vllm_offline import VLLMOfflineEmbeddingClient
 
 
 def _parse_torch_dtype(dtype: Optional[str]) -> Optional[torch.dtype]:
@@ -231,6 +227,7 @@ def load_embedding_session(
             raise ValueError("base_url is required for the sglang HTTP embedding backend")
         if print_model_info:
             print(f"[embedding.load] backend=sglang-http base_url={base_url} model_id={model_id} api={api}")
+        from .embedding_backends.sglang_http import SGLangHTTPEmbeddingClient
         return SGLangHTTPEmbeddingClient(
             base_url=base_url,
             model=model_id,
@@ -249,6 +246,7 @@ def load_embedding_session(
                 f"device={device or kwargs.get('device', 'cuda')} dtype={kwargs.get('dtype', 'auto')} "
                 f"tp_size={kwargs.get('tp_size', kwargs.get('tensor_parallel_size', 1))}"
             )
+        from .embedding_backends.sglang_offline import SGLangOfflineEmbeddingClient
         return SGLangOfflineEmbeddingClient(
             model=model_id,
             dtype=kwargs.get("dtype", "auto"),
@@ -273,6 +271,7 @@ def load_embedding_session(
             print(
                 f"[embedding.load] backend=vllm-http base_url={base_url} model_id={model_id} encoding_format={encoding_format}"
             )
+        from .embedding_backends.vllm_http import VLLMHTTPEmbeddingClient
         return VLLMHTTPEmbeddingClient(
             base_url=base_url,
             model=model_id,
@@ -291,6 +290,7 @@ def load_embedding_session(
                 f"tp_size={kwargs.get('tensor_parallel_size', kwargs.get('tp_size', 1))} "
                 f"max_model_len={kwargs.get('max_model_len', 8192)} gpu_mem_util={kwargs.get('gpu_memory_utilization', 0.90)}"
             )
+        from .embedding_backends.vllm_offline import VLLMOfflineEmbeddingClient
         return VLLMOfflineEmbeddingClient(
             model=model_id,
             dtype=kwargs.get("dtype", "auto"),

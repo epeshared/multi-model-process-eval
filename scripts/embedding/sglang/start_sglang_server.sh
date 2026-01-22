@@ -11,7 +11,7 @@ echo "WORK_HOME=$WORK_HOME"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-0.6B"
-MODEL_DIR="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding"
+MODEL_DIR="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"
 ###############################################
 echo "Using model: $MODEL_DIR"
 

@@ -51,7 +51,7 @@ class VLLMHTTPEmbeddingClient:
         return h
 
     def _post_embeddings(self, inputs: Union[str, List[str]]) -> List[List[float]]:
-        url = f"{self.base_url}/embeddings"
+        urls = [f"{self.base_url}/v1/embeddings", f"{self.base_url}/embeddings"]
         payload: Dict[str, Any] = {"model": self.model, "input": inputs}
         if self.encoding_format:
             payload["encoding_format"] = self.encoding_format
@@ -59,11 +59,15 @@ class VLLMHTTPEmbeddingClient:
         last_err: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = self.session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
-                resp.raise_for_status()
-                data = resp.json()
-                rows = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
-                return [list(map(float, r["embedding"])) for r in rows]
+                for url in urls:
+                    resp = self.session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    rows = sorted(data.get("data", []), key=lambda x: x.get("index", 0))
+                    return [list(map(float, r["embedding"])) for r in rows]
+                raise RuntimeError("vLLM embeddings endpoint not found (tried /v1/embeddings and /embeddings)")
             except Exception as e:  # pragma: no cover - network
                 last_err = e
                 if attempt >= self.max_retries:
@@ -72,17 +76,21 @@ class VLLMHTTPEmbeddingClient:
         raise RuntimeError(f"vLLM HTTP embeddings failed after {self.max_retries} attempts: {last_err}")
 
     @torch.inference_mode()
-    def encode(self, texts: List[str], batch_size: int = 128) -> torch.Tensor:
+    def encode(self, texts: List[str], batch_size: int = 128, normalize: bool = True) -> torch.Tensor:
         if not texts:
             return torch.empty(0, 0)
+
+        def _maybe_normalize(t: torch.Tensor) -> torch.Tensor:
+            return _l2_normalize(t) if normalize else t
+
         out: List[torch.Tensor] = []
         if batch_size <= 1:
             for t in texts:
                 vecs = self._post_embeddings(t)
-                out.append(_l2_normalize(torch.tensor(vecs, dtype=torch.float32)))
+                out.append(_maybe_normalize(torch.tensor(vecs, dtype=torch.float32)))
         else:
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
                 vecs = self._post_embeddings(batch)
-                out.append(_l2_normalize(torch.tensor(vecs, dtype=torch.float32)))
+                out.append(_maybe_normalize(torch.tensor(vecs, dtype=torch.float32)))
         return torch.cat(out, dim=0)
