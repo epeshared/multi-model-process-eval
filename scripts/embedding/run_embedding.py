@@ -27,12 +27,17 @@ EMBED_MODELS: List[str] = [
     "qwen3-embedding-4b",
     "qwen3-embedding-0.6b",
     "clip-vit-base-patch32",
+    "youtu-embedding",
 ]
 
 MODEL_ID_MAP: Dict[str, str] = {
     "qwen3-embedding-4b": "Qwen/Qwen3-Embedding-4B",
     "qwen3-embedding-0.6b": "Qwen/Qwen3-Embedding-0.6B",
     "clip-vit-base-patch32": "openai/clip-vit-base-patch32",
+    # NOTE:
+    # - For offline backends, you will typically override this with a local path (e.g. via --model-id).
+    # - For backend=vllm-http, this should match the vLLM OpenAI server's `--served-model-name`.
+    "youtu-embedding": "sn-large-multi-language-v0.2.5",
 }
 
 EMBED_BACKENDS: List[str] = [

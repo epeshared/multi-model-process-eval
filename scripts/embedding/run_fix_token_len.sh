@@ -34,9 +34,32 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
 
-MODEL=${MODEL:-qwen3-embedding-4b}
-MODEL_ID=${MODEL_ID:-/home/xtang/models/Qwen/Qwen3-Embedding-4B}
+# MODEL=${MODEL:-qwen3-embedding-4b}
+# MODEL_ID=${MODEL_ID:-/home/xtang/models/Qwen/Qwen3-Embedding-4B}
+
+MODEL=${MODEL:-youtu-embedding}
 BACKEND=${BACKEND:-sglang}
+
+# Default MODEL_ID differs by backend for this model:
+# - offline backends expect a local model path
+# - vllm-http expects the served model name (the `model` string used in /v1/embeddings)
+if [[ "${MODEL}" == "youtu-embedding" ]]; then
+  YOUTU_MODEL_DIR_DEFAULT="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding"
+  YOUTU_VLLM_SERVED_MODEL_NAME_DEFAULT="sn-large-multi-language-v0.2.5"
+  MODEL_ID="${MODEL_ID:-}"
+  if [[ -z "${MODEL_ID}" ]]; then
+    case "${BACKEND}" in
+      vllm-http|vllm_openai|vllm-http-openai)
+        MODEL_ID="${YOUTU_VLLM_SERVED_MODEL_NAME_DEFAULT}"
+        ;;
+      *)
+        MODEL_ID="${YOUTU_MODEL_DIR_DEFAULT}"
+        ;;
+    esac
+  fi
+else
+  MODEL_ID="${MODEL_ID:-}"
+fi
 
 MAX_SAMPLES=${MAX_SAMPLES:-1000}
 BATCH_SIZE=${BATCH_SIZE:-100}

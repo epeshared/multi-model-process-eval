@@ -9,7 +9,8 @@ echo "WORK_HOME=$WORK_HOME"
 ###############################################
 # MODEL_DIR="/home/xtang/models/openai/clip-vit-base-patch32"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
-MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct"}
+# MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-7B-Instruct"}
+MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen2.5-VL-3B-Instruct"}
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-0.6B"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
 ###############################################

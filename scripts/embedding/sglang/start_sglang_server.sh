@@ -9,8 +9,9 @@ echo "WORK_HOME=$WORK_HOME"
 ###############################################
 # MODEL_DIR="/home/xtang/models/openai/clip-vit-base-patch32"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
-MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
+# MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-0.6B"
+MODEL_DIR="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding"
 ###############################################
 echo "Using model: $MODEL_DIR"
 
@@ -62,6 +63,7 @@ python -m sglang.launch_server \
   --host 0.0.0.0 --port 30000 \
   --skip-server-warmup \
   --tp 1 \
+  --dtype float16 \
   --enable-torch-compile \
   --torch-compile-max-bs "$BATCH_SIZE" \
   --attention-backend intel_amx \
