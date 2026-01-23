@@ -90,6 +90,42 @@ PY
 
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 
 
+# Optional preloads (tcmalloc + iomp) for better CPU threading/memory behavior.
+# Safe under `set -u` and only preloads libs that exist.
+PY_PREFIX="$(python - <<'PY'
+import sys
+print(sys.prefix)
+PY
+)"
+
+TC_PATH=${TC_PATH:-"${PY_PREFIX}/lib/libtcmalloc_minimal.so.4"}
+IOMP_PATH=${IOMP_PATH:-"${PY_PREFIX}/lib/libiomp5.so"}
+
+PRELOAD_ITEMS=()
+if [[ -f "${TC_PATH}" ]]; then
+  PRELOAD_ITEMS+=("${TC_PATH}")
+else
+  echo "WARN: TC_PATH not found, skipping preload: ${TC_PATH}" >&2
+fi
+
+if [[ -f "${IOMP_PATH}" ]]; then
+  PRELOAD_ITEMS+=("${IOMP_PATH}")
+else
+  echo "WARN: IOMP_PATH not found, skipping preload: ${IOMP_PATH}" >&2
+fi
+
+if [[ -n "${LD_PRELOAD:-}" ]]; then
+  PRELOAD_ITEMS+=("${LD_PRELOAD}")
+fi
+
+if [[ ${#PRELOAD_ITEMS[@]} -gt 0 ]]; then
+  export LD_PRELOAD
+  LD_PRELOAD="$(IFS=:; echo "${PRELOAD_ITEMS[*]}")"
+  echo "LD_PRELOAD=${LD_PRELOAD}"
+else
+  echo "LD_PRELOAD=<unset>"
+fi
+
 CMD=(
 python -m vllm.entrypoints.openai.api_server
   --model "$MODEL_DIR"
