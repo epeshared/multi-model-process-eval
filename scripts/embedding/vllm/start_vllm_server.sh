@@ -88,6 +88,13 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
 # Options depend on your vLLM build: auto|float32|float16|bfloat16
 DTYPE=${DTYPE:-bfloat16}
 
+case "${DTYPE}" in
+  float16|fp16|half)
+    echo "WARN: DTYPE=${DTYPE} on CPU can produce NaNs for embeddings; forcing DTYPE=float32." >&2
+    DTYPE=float32
+    ;;
+esac
+
 # CPU startup can spend a long time compiling/warming up. Default to eager mode
 # (no compilation) for predictable startup; set ENFORCE_EAGER=0 to re-enable.
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}

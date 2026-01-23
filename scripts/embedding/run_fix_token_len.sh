@@ -80,6 +80,13 @@ BASE_URL=${BASE_URL:-http://127.0.0.1:9090}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 
+# vLLM OpenAI embeddings support encoding_format=float|base64.
+# base64 avoids server-side JSON serialization failures when embeddings contain NaNs.
+ENCODING_FORMAT=${ENCODING_FORMAT:-}
+if [[ "${BACKEND}" == vllm-http* ]] && [[ -z "${ENCODING_FORMAT}" ]]; then
+  ENCODING_FORMAT=base64
+fi
+
 MODE=${MODE:-input_len}
 
 SYNTHETIC_INPUT_LEN=${SYNTHETIC_INPUT_LEN:-512}
@@ -235,6 +242,7 @@ echo "[run_embedding_synth] PROFILE_ACTIVITIES=${PROFILE_ACTIVITIES}"
 echo "[run_embedding_synth] PROFILE_OUT_DIR=${PROFILE_OUT_DIR:-<unset>}"
 echo "[run_embedding_synth] PROFILE_OUT_NAME=${PROFILE_OUT_NAME}"
 echo "[run_embedding_synth] PROFILE_STRICT=${PROFILE_STRICT}"
+echo "[run_embedding_synth] ENCODING_FORMAT=${ENCODING_FORMAT:-<unset>}"
 
 if [[ $# -gt 0 ]]; then
   printf '[run_embedding_synth] EXTRA_ARGS='; printf '%q ' "$@"; printf '\n'
@@ -268,4 +276,5 @@ python scripts/embedding/run_embedding.py \
   ${BASE_URL:+--base-url "${BASE_URL}"} \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \
+  ${ENCODING_FORMAT:+--encoding-format "${ENCODING_FORMAT}"} \
   "$@"
