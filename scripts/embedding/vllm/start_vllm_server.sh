@@ -241,6 +241,34 @@ case "${ENFORCE_EAGER}" in
     ;;
 esac
 
+TC_PATH="/root/miniforge3/envs/xtang-embedding-cpu/lib/libtcmalloc_minimal.so.4"
+IOMP_PATH="/root/miniforge3/envs/xtang-embedding-cpu/lib/libiomp5.so"
+
+PRELOAD_ITEMS=()
+if [[ -f "${TC_PATH}" ]]; then
+  PRELOAD_ITEMS+=("${TC_PATH}")
+else
+  echo "WARN: TC_PATH not found, skipping preload: ${TC_PATH}" >&2
+fi
+
+if [[ -f "${IOMP_PATH}" ]]; then
+  PRELOAD_ITEMS+=("${IOMP_PATH}")
+else
+  echo "WARN: IOMP_PATH not found, skipping preload: ${IOMP_PATH}" >&2
+fi
+
+if [[ -n "${LD_PRELOAD:-}" ]]; then
+  PRELOAD_ITEMS+=("${LD_PRELOAD}")
+fi
+
+if [[ ${#PRELOAD_ITEMS[@]} -gt 0 ]]; then
+  export LD_PRELOAD
+  LD_PRELOAD="$(IFS=:; echo "${PRELOAD_ITEMS[*]}")"
+  echo "LD_PRELOAD=${LD_PRELOAD}"
+else
+  echo "LD_PRELOAD=<unset>"
+fi
+
 CMD=(
   python -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR"
