@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run embeddings on synthetic_tokens dataset only.
-# It generates MAX_SAMPLES texts with ~SYNTHETIC_TOKEN_LEN tokens each.
+# Run embeddings on a synthetic dataset with controlled input size.
+#
+# Modes:
+#   MODE=input_len (default)  -> dataset=synthetic_fixed_len, exact SYNTHETIC_INPUT_LEN characters
+#   MODE=token_len            -> dataset=synthetic_tokens, ~SYNTHETIC_TOKEN_LEN tokens
 #
 # Environment overrides:
 #   MODEL (default: qwen3-embedding-4b)
 #   MODEL_ID (default: /home/xtang/models/Qwen/Qwen3-Embedding-4B)
 #   BACKEND (default: sglang-offline)
-#   SYNTHETIC_TOKEN_LEN (required; e.g. 20)
+#   MODE (default: input_len)
+#   SYNTHETIC_INPUT_LEN (for MODE=input_len; e.g. 512)
+#   SYNTHETIC_TOKEN_LEN (for MODE=token_len; e.g. 20)
 #   SYNTHETIC_SEED (default: 12345)
 #   MAX_SAMPLES (default: 1000)
 #   BATCH_SIZE (default: 100)
@@ -28,8 +33,13 @@ set -euo pipefail
 #   PROFILE_STRICT (true/1/yes/on)             # --profile-strict
 #
 # Usage:
-#   SYNTHETIC_TOKEN_LEN=20 MAX_SAMPLES=10000 ./run_embedding_synthetic.sh [extra python args...]
-#   ./run_embedding_synthetic.sh 20 [extra python args...]
+#   # Fixed character length
+#   MODE=input_len SYNTHETIC_INPUT_LEN=512 MAX_SAMPLES=10000 $0 [extra python args...]
+#   $0 512 [extra python args...]
+#
+#   # Fixed token length
+#   MODE=token_len SYNTHETIC_TOKEN_LEN=20 MAX_SAMPLES=10000 $0 [extra python args...]
+#   $0 20 [extra python args...]
 
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../.." && pwd)
@@ -70,20 +80,49 @@ BASE_URL=${BASE_URL:-http://127.0.0.1:9090}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 
+MODE=${MODE:-input_len}
+
+SYNTHETIC_INPUT_LEN=${SYNTHETIC_INPUT_LEN:-512}
 SYNTHETIC_TOKEN_LEN=${SYNTHETIC_TOKEN_LEN:-20}
 SYNTHETIC_SEED=${SYNTHETIC_SEED:-12345}
 
-# Optional positional override: first arg = token_len
+case "${MODE}" in
+  token_len|tokens|token|tok)
+    MODE=token_len
+    ;;
+  input_len|input|len|char|chars)
+    MODE=input_len
+    ;;
+  *)
+    echo "Error: MODE must be input_len or token_len (got: ${MODE})." >&2
+    exit 1
+    ;;
+esac
+
+# Optional positional override: first arg = length (meaning depends on MODE)
 if [[ $# -gt 0 ]] && [[ "${1:-}" =~ ^[0-9]+$ ]]; then
-  SYNTHETIC_TOKEN_LEN="$1"
+  if [[ "${MODE}" == "token_len" ]]; then
+    SYNTHETIC_TOKEN_LEN="$1"
+  else
+    SYNTHETIC_INPUT_LEN="$1"
+  fi
   shift
 fi
 
-if [[ ! "${SYNTHETIC_TOKEN_LEN}" =~ ^[0-9]+$ ]] || (( SYNTHETIC_TOKEN_LEN <= 0 )); then
-  echo "Usage: SYNTHETIC_TOKEN_LEN=20 MAX_SAMPLES=10000 $0 [extra python args...]" >&2
-  echo "   or: $0 20 [extra python args...]" >&2
-  echo "Error: SYNTHETIC_TOKEN_LEN must be > 0 (got: ${SYNTHETIC_TOKEN_LEN})." >&2
-  exit 1
+if [[ "${MODE}" == "token_len" ]]; then
+  if [[ ! "${SYNTHETIC_TOKEN_LEN}" =~ ^[0-9]+$ ]] || (( SYNTHETIC_TOKEN_LEN <= 0 )); then
+    echo "Usage: MODE=token_len SYNTHETIC_TOKEN_LEN=20 MAX_SAMPLES=10000 $0 [extra python args...]" >&2
+    echo "   or: MODE=token_len $0 20 [extra python args...]" >&2
+    echo "Error: SYNTHETIC_TOKEN_LEN must be > 0 (got: ${SYNTHETIC_TOKEN_LEN})." >&2
+    exit 1
+  fi
+else
+  if [[ ! "${SYNTHETIC_INPUT_LEN}" =~ ^[0-9]+$ ]] || (( SYNTHETIC_INPUT_LEN <= 0 )); then
+    echo "Usage: MODE=input_len SYNTHETIC_INPUT_LEN=512 MAX_SAMPLES=10000 $0 [extra python args...]" >&2
+    echo "   or: MODE=input_len $0 512 [extra python args...]" >&2
+    echo "Error: SYNTHETIC_INPUT_LEN must be > 0 (got: ${SYNTHETIC_INPUT_LEN})." >&2
+    exit 1
+  fi
 fi
 
 if [[ ! "${MAX_SAMPLES}" =~ ^-?[0-9]+$ ]] || (( MAX_SAMPLES <= 0 )); then
@@ -176,7 +215,12 @@ echo "[run_embedding_synth] MODEL=${MODEL}"
 echo "[run_embedding_synth] MODEL_ID=${MODEL_ID:-<unset>}"
 echo "[run_embedding_synth] BACKEND=${BACKEND}"
 echo "[run_embedding_synth] MAX_SAMPLES=${MAX_SAMPLES}"
-echo "[run_embedding_synth] SYNTHETIC_TOKEN_LEN=${SYNTHETIC_TOKEN_LEN}"
+echo "[run_embedding_synth] MODE=${MODE}"
+if [[ "${MODE}" == "token_len" ]]; then
+  echo "[run_embedding_synth] SYNTHETIC_TOKEN_LEN=${SYNTHETIC_TOKEN_LEN}"
+else
+  echo "[run_embedding_synth] SYNTHETIC_INPUT_LEN=${SYNTHETIC_INPUT_LEN}"
+fi
 echo "[run_embedding_synth] SYNTHETIC_SEED=${SYNTHETIC_SEED}"
 echo "[run_embedding_synth] BATCH_SIZE=${BATCH_SIZE}"
 echo "[run_embedding_synth] DEVICE=${DEVICE:-<unset>}"
@@ -198,13 +242,23 @@ else
   echo "[run_embedding_synth] EXTRA_ARGS=<none>"
 fi
 
+DATASET_ARG=()
+LEN_ARG=()
+if [[ "${MODE}" == "token_len" ]]; then
+  DATASET_ARG=(--dataset synthetic_tokens)
+  LEN_ARG=(--synthetic-token-len "${SYNTHETIC_TOKEN_LEN}")
+else
+  DATASET_ARG=(--dataset synthetic_fixed_len)
+  LEN_ARG=(--synthetic-input-len "${SYNTHETIC_INPUT_LEN}")
+fi
+
 python scripts/embedding/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
   --backend "${BACKEND}" \
-  --dataset synthetic_tokens \
+  "${DATASET_ARG[@]}" \
   --max-samples "${MAX_SAMPLES}" \
-  --synthetic-token-len "${SYNTHETIC_TOKEN_LEN}" \
+  "${LEN_ARG[@]}" \
   --synthetic-seed "${SYNTHETIC_SEED}" \
   --batch-size "${BATCH_SIZE}" \
   "${USE_AMX_ARG[@]}" \

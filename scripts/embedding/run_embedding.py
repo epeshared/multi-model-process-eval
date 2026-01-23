@@ -59,6 +59,10 @@ DATASET_LOADERS: Dict[str, Dict[str, Any]] = {
     "synthetic_tokens": {
         "modality": "text",
     },
+    # NEW: synthetic fixed input length text dataset
+    "synthetic_fixed_len": {
+        "modality": "text",
+    },
 }
 
 
@@ -114,6 +118,29 @@ def _gen_synthetic_token_texts(
     return out
 
 
+def _gen_synthetic_fixed_len_texts(
+    num_samples: int,
+    input_len: int,
+    seed: int = 12345,
+) -> List[str]:
+    """Generate random texts with exact character length == input_len."""
+    import random
+    import string
+
+    if num_samples <= 0:
+        return []
+    if input_len <= 0:
+        raise ValueError("--synthetic-input-len must be > 0 when --dataset=synthetic_fixed_len")
+
+    rng = random.Random(seed)
+    alphabet = string.ascii_lowercase + string.digits + " "
+    out: List[str] = []
+    for _ in range(num_samples):
+        s = "".join(rng.choice(alphabet) for _ in range(input_len))
+        out.append(s)
+    return out
+
+
 def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
     if dataset == "yahoo_answers":
         from src.data import load_yahoo_answers_jsonl
@@ -124,6 +151,13 @@ def _get_dataset_loader(dataset: str) -> Tuple[Callable[..., List[Any]], str]:
 
         def _loader(*, num_samples: int, token_len: int, seed: int) -> List[str]:
             return _gen_synthetic_token_texts(num_samples=num_samples, token_len=token_len, seed=seed)
+
+        return _loader, "text"
+
+    if dataset == "synthetic_fixed_len":
+
+        def _loader(*, num_samples: int, input_len: int, seed: int) -> List[str]:
+            return _gen_synthetic_fixed_len_texts(num_samples=num_samples, input_len=input_len, seed=seed)
 
         return _loader, "text"
 
@@ -154,6 +188,12 @@ def parse_args(argv: Any = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="When --dataset=synthetic_tokens, generate texts with ~this many tokens (e.g., 20).",
+    )
+    parser.add_argument(
+        "--synthetic-input-len",
+        type=int,
+        default=0,
+        help="When --dataset=synthetic_fixed_len, generate texts with this exact character length (e.g., 512).",
     )
     parser.add_argument(
         "--synthetic-seed",
@@ -427,6 +467,19 @@ def main(argv: Any = None) -> None:
             seed=int(args.synthetic_seed),
         )
 
+    elif args.dataset == "synthetic_fixed_len":
+        max_samples = int(args.max_samples)
+        if max_samples <= 0:
+            raise ValueError("--max-samples must be > 0 when --dataset=synthetic_fixed_len")
+        if int(args.synthetic_input_len) <= 0:
+            raise ValueError("--synthetic-input-len must be > 0 when --dataset=synthetic_fixed_len")
+
+        inputs = loader(
+            num_samples=max_samples,
+            input_len=int(args.synthetic_input_len),
+            seed=int(args.synthetic_seed),
+        )
+
     elif args.dataset == "yahoo_answers":
         if not args.dataset_path:
             raise ValueError("--dataset-path is required for --dataset=yahoo_answers")
@@ -483,6 +536,14 @@ def main(argv: Any = None) -> None:
         summary.update(
             {
                 "synthetic_token_len": int(args.synthetic_token_len),
+                "synthetic_seed": int(args.synthetic_seed),
+            }
+        )
+
+    if args.dataset == "synthetic_fixed_len":
+        summary.update(
+            {
+                "synthetic_input_len": int(args.synthetic_input_len),
                 "synthetic_seed": int(args.synthetic_seed),
             }
         )

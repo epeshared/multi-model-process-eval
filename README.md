@@ -1,115 +1,79 @@
 # multi-model-process-eval
 
-提供一套统一的代码骨架，用 sglang、vllm、torch 三类后端跑不同模态的模型。所有模型都挂在注册表里，通过各自的脚本入口运行。文本向量现已支持 torch 本地、sglang HTTP/离线 Engine，以及 vLLM 本地与 OpenAI 兼容 HTTP。
+提供一套统一的代码骨架，用 **torch / sglang / vLLM** 三类后端跑不同任务（embedding、LLM、VL、Omni）。本仓库以 `src/tasks/*` 作为任务逻辑层，以 `scripts/*` 作为可直接运行的脚本入口（含 server 启动脚本与压测脚本）。
 
-## 目录
+## 快速导航（推荐从这里开始）
 
-- src/backends: 三个后端封装（torch/vllm/sglang）。
-- src/tasks: 按任务的最小推理逻辑（生成、分类、翻译、扩散等）。
-- src/registry.py: 模型注册表与统一分发。
-- src/cli.py: 通用 CLI 入口。
-- scripts/: 分任务的脚本入口。
+- 总入口与脚本说明：[`scripts/README.md`](scripts/README.md)
+- Embedding（文本/图像向量 + 合成数据压测）：[`scripts/embedding/README.md`](scripts/embedding/README.md)
+- Qwen3（LLM 压测 + TTFT/TPOT）：[`scripts/qwen3/README.md`](scripts/qwen3/README.md)
+- Omni（多模态/音频等 Omni 模型压测）：[`scripts/omni/README.md`](scripts/omni/README.md)
+- 工具脚本（如 FP8->FP16）：[`scripts/tools/README.md`](scripts/tools/README.md)
 
-## 支持模型与对应脚本
+## 目录结构
 
-- 文本生成: qwen3-1.7b, qwen2.5-omni-7b, flan-t5-summarization, pythia-6.9b → scripts/run_text_generation.py
-- 文本向量: qwen3-embedding-4b, qwen3-embedding-0.6b → scripts/run_embedding.py
-- 文本分类: klue-roberta-intent, financial-sentiment, topic-classification → scripts/run_text_classification.py
-- 翻译: opus-mt-zh-en, opus-mt-en-zh → scripts/run_translation.py
-- 视觉: openai-clip-vit-base-patch32, nsfw-image-detection, aesthetics-predictor-v1, aesthetics-predictor-v2, watermark-detector, blip2-opt-2.7b, owlvit-base, blip-itm-base → scripts/run_vision.py
-- 视觉语言: qwen2.5-vl-7b-instruct, llava-vicuna-7b → scripts/run_multimodal.py
-- 扩散: stable-diffusion-v1-4, stable-diffusion-xl → scripts/run_diffusion.py
-- 音频: qwen-audio, ast-audioset → scripts/run_audio.py
-- 视频: video-blip-ego4d → scripts/run_video.py
+- `src/data/`：数据集与输入构造（如 Yahoo / Flickr8k / synthetic）。
+- `src/tasks/`：按任务划分的最小推理逻辑（embedding / qwen3 / vl / omni 等）及对应 backend 适配层。
+- `scripts/`：可运行脚本入口与 server 启动脚本（sglang/vllm），按任务分目录。
 
-## 依赖
+## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
 
-按需安装 vllm/sglang（仅文本生成模型需要）。
+说明：不同任务/后端对环境要求不同，尤其是 `vllm` / `sglang`（CPU vs CUDA、openai 依赖版本等）。建议优先参考对应子目录 README 的“Start servers / Usage”。
 
-## 示例
+## 常用示例
 
-文本生成（torch 默认）:
+### Embedding：合成固定长度压测
+
+详见 [`scripts/embedding/README.md`](scripts/embedding/README.md)。
 
 ```bash
-python scripts/run_text_generation.py --model qwen3-1.7b --prompt "Hello" --max-new-tokens 64
+cd scripts/embedding
+
+# 固定字符长度（默认 MODE=input_len）
+MODE=input_len SYNTHETIC_INPUT_LEN=512 MAX_SAMPLES=10000 BACKEND=torch DEVICE=cpu \
+  ./run_fix_token_len.sh
+
+# 固定 token 长度
+MODE=token_len SYNTHETIC_TOKEN_LEN=64 MAX_SAMPLES=10000 BACKEND=torch DEVICE=cpu \
+  ./run_fix_token_len.sh
 ```
 
-文本生成（vllm）:
+### Embedding：vLLM OpenAI 兼容 HTTP
+
+1) 启动 vLLM embedding server（示例端口 9090）：
 
 ```bash
-python scripts/run_text_generation.py --model qwen3-1.7b --backend vllm --prompt "你好" --max-new-tokens 64
+cd scripts/embedding/vllm
+PORT=9090 ./start_vllm_server.sh
 ```
 
-向量（torch，本地模型）:
+2) 运行 client：
 
 ```bash
-python scripts/run_embedding.py --model qwen3-embedding-4b --backend torch --texts "今天天气不错" "How are you"
+cd scripts/embedding
+BASE_URL=http://127.0.0.1:9090 BACKEND=vllm-http \
+  MODE=input_len SYNTHETIC_INPUT_LEN=512 MAX_SAMPLES=10000 \
+  ./run_fix_token_len.sh
 ```
 
-向量（sglang HTTP /v1/embeddings，多模态也可）:
+### Qwen3：LLM 压测
+
+详见 [`scripts/qwen3/README.md`](scripts/qwen3/README.md)。
 
 ```bash
-python scripts/run_embedding.py --model qwen3-embedding-4b --backend sglang \
-  --base-url http://127.0.0.1:30000 --api v1 --texts "hello" "world"
+cd scripts/qwen3
+./run_qwen3_test.sh
 ```
 
-向量（sglang 离线 Engine，本地模型路径）:
+### Omni：多模态压测
+
+详见 [`scripts/omni/README.md`](scripts/omni/README.md)。
 
 ```bash
-python scripts/run_embedding.py --model /path/to/model --backend sglang-offline \
-  --device cuda:0 --batch-size 64 --texts "hello" "world"
-```
-
-向量（vLLM OpenAI 兼容 HTTP /v1/embeddings）:
-
-```bash
-python scripts/run_embedding.py --model Qwen/Qwen3-Embedding-0.6B --backend vllm-http \
-  --base-url http://127.0.0.1:8000/v1 --texts "hello" "world"
-```
-
-向量（vLLM 本地 embed）:
-
-```bash
-python scripts/run_embedding.py --model Qwen/Qwen3-Embedding-0.6B --backend vllm \
-  --tp-size 1 --max-model-len 8192 --texts "hello" "world"
-```
-
-图像 NSFW:
-
-```bash
-python scripts/run_vision.py --model nsfw-image-detection --image path/to/img.jpg
-```
-
-CLIP 相似度:
-
-```bash
-python scripts/run_vision.py --model openai-clip-vit-base-patch32 --image img.jpg --texts "a cat" "a dog"
-```
-
-扩散生成:
-
-```bash
-python scripts/run_diffusion.py --model stable-diffusion-v1-4 --prompt "a sunset city"
-```
-
-音频分类:
-
-```bash
-python scripts/run_audio.py --model ast-audioset --audio sample.wav
-```
-
-多模态问答:
-
-```bash
-python scripts/run_multimodal.py --model llava-vicuna-7b --image demo.jpg --prompt "Describe the scene"
-```
-
-统一入口（可用作底层调用）:
-
-```bash
-python -m src.cli --model-key qwen3-1.7b --backend torch --prompt "Hello"
+cd scripts/omni
+./run_qwen_omni_synthetic.sh
 ```
