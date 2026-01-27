@@ -78,17 +78,42 @@ def _load_json_if_valid(path: Path) -> Any | None:
         return None
 
 
-def _merge_run_by_model_name(runs: list[Any], *, model_name: str, run_entry: dict[str, Any]) -> list[Any]:
-    """Merge/overwrite a run in `runs` by matching `model_name`."""
+def _merge_run_by_model_backend(
+    runs: list[Any],
+    *,
+    model_name: str,
+    backend: str,
+    run_entry: dict[str, Any],
+) -> list[Any]:
+    """Merge/overwrite a run in `runs` by matching (model_name, backend).
+
+    Legacy behavior:
+      If an existing entry has matching model_name but missing backend, we treat it
+      as a match (only if there isn't already an exact (model_name, backend) match).
+    """
     out = list(runs)
-    replaced = False
+
+    # Prefer exact match.
     for i, r in enumerate(list(out)):
-        if isinstance(r, dict) and r.get("model_name") == model_name:
+        if not isinstance(r, dict):
+            continue
+        if r.get("model_name") == model_name and r.get("backend") == backend:
             out[i] = run_entry
-            replaced = True
+            return out
+
+    # Fallback: upgrade a legacy entry that has model_name but no backend.
+    legacy_index: int | None = None
+    for i, r in enumerate(list(out)):
+        if not isinstance(r, dict):
+            continue
+        if r.get("model_name") == model_name and ("backend" not in r or r.get("backend") in (None, "")):
+            legacy_index = i
             break
-    if not replaced:
-        out.append(run_entry)
+    if legacy_index is not None:
+        out[legacy_index] = run_entry
+        return out
+
+    out.append(run_entry)
     return out
 
 
@@ -398,8 +423,10 @@ def main() -> None:
                     existing_runs = []
 
                 model_name = str(args.model_id)
+                backend_name = str(args.backend)
                 summary_run_entry: dict[str, Any] = {
                     "model_name": model_name,
+                    "backend": backend_name,
                     "scores": data.get("scores"),
                     "evaluation_time": data.get("evaluation_time"),
                     "kg_co2_emissions": data.get("kg_co2_emissions"),
@@ -407,9 +434,10 @@ def main() -> None:
                     "embedding_stats": data.get("embedding_stats"),
                 }
 
-                merged_runs = _merge_run_by_model_name(
+                merged_runs = _merge_run_by_model_backend(
                     existing_runs,
                     model_name=model_name,
+                    backend=backend_name,
                     run_entry=summary_run_entry,
                 )
 
