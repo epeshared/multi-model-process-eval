@@ -1,0 +1,2 @@
+# Optional dependencies for running MTEB evaluations
+mteb>=2.0.0

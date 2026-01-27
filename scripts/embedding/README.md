@@ -86,3 +86,10 @@ Some wrappers can pass profiling flags through to `run_embedding.py`:
 - `PROFILE_OUT_DIR`, `PROFILE_OUT_NAME`
 
 (Profiling support depends on the backend; see `run_embedding.py --help` and backend implementations.)
+
+## MTEB
+
+There is an optional MTEB integration under `scripts/embedding/mteb`.
+
+- Install: `pip install -r requirements.txt -r requirements-mteb.txt`
+- Run: `python scripts/embedding/mteb/run_mteb.py --help`

@@ -66,7 +66,9 @@ echo "WORK_HOME=$WORK_HOME"
 ###############################################
 #        ✅ 仅需在这里配置模型路径即可
 ###############################################
-MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"}
+# MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"}
+# MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B"}
+MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B"}
 ###############################################
 echo "Using model: $MODEL_DIR"
 
@@ -74,7 +76,9 @@ echo "Using model: $MODEL_DIR"
 export MODEL_DIR
 
 # IMPORTANT: must match what client sends as `model` for OpenAI-compatible endpoints.
-SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-sn-large-multi-language-v0.2.5}
+# SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-sn-large-multi-language-v0.2.5}
+# SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen3-Embedding-0.6B}
+SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen3-Embedding-4B}
 
 # ===== Server bind =====
 HOST=${HOST:-0.0.0.0}
@@ -90,8 +94,8 @@ DTYPE=${DTYPE:-bfloat16}
 
 case "${DTYPE}" in
   float16|fp16|half)
-    echo "WARN: DTYPE=${DTYPE} on CPU can produce NaNs for embeddings; forcing DTYPE=float32." >&2
-    DTYPE=float32
+    echo "WARN: DTYPE=${DTYPE} on CPU can produce NaNs for embeddings; forcing DTYPE=bfloat16." >&2
+    DTYPE=bfloat16
     ;;
 esac
 
