@@ -6,6 +6,7 @@ ROOT_DIR=$(cd -- "${SCRIPT_DIR}/../../.." && pwd)
 
 CONFIG_ARG=()
 
+#--stop-servers-after-job
 # Convenience: allow passing config JSON as first positional arg.
 # Examples:
 #   ./run_auto_test.sh config_yahoo.json

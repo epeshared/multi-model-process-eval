@@ -71,6 +71,19 @@ else
   MODEL_ID="${MODEL_ID:-}"
 fi
 
+# If the caller provides MODEL_DIR, prefer it for offline backends.
+# This avoids accidentally treating a served model name (e.g. "Qwen3-Embedding-4B")
+# as a HuggingFace repo_id in offline mode.
+if [[ -n "${MODEL_DIR:-}" ]]; then
+  case "${BACKEND}" in
+    sglang-offline|sglang_offline|vllm|vllm-offline|vllm_offline)
+      if [[ -z "${MODEL_ID:-}" ]] || [[ ! -d "${MODEL_ID}" ]]; then
+        MODEL_ID="${MODEL_DIR}"
+      fi
+      ;;
+  esac
+fi
+
 MAX_SAMPLES=${MAX_SAMPLES:-1000}
 BATCH_SIZE=${BATCH_SIZE:-100}
 DEVICE=${DEVICE:-cpu}

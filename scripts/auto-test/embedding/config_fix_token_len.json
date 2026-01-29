@@ -9,6 +9,7 @@
     "result_dir": "scripts/auto-test/embedding/result/fix_token_len",
     "timeout_sec": 21600,
     "restart_servers": true,
+    "stop_server_after_job": true,
     "env": {
       "PYTHONUNBUFFERED": "1"
     }
@@ -21,7 +22,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "0-15",
+        "cores": "0-7",
         "cpunodebind": "",
         "membind": ""
       },
@@ -44,7 +45,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "0-15",
+        "cores": "0-7",
         "cpunodebind": "",
         "membind": ""
       },
@@ -66,7 +67,6 @@
       "name": "fixlen_20_qwen3-embedding-4b_sglang-online",
       "script": "run_fix_token_len",
       "args": {
-        "token_len": 20
       },
       "warmup_runs": 2,
       "env": {
@@ -81,16 +81,17 @@
         "HOST": "0.0.0.0",
         "PORT": "30000",
         "BASE_URL": "http://127.0.0.1:30000",
-        "MODE": "input_len",
+        "MODE": "token_len",
         "MAX_SAMPLES": "1000",
-        "BATCH_SIZE": "100"
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
       }
     },
     {
       "name": "fixlen_20_qwen3-embedding-4b_vllm-http",
       "script": "run_fix_token_len",
       "args": {
-        "token_len": 20
       },
       "warmup_runs": 2,
       "env": {
@@ -105,10 +106,62 @@
         "HOST": "0.0.0.0",
         "PORT": "9090",
         "BASE_URL": "http://127.0.0.1:9090",
-        "MODE": "input_len",
+        "MODE": "token_len",
         "MAX_SAMPLES": "1000",
-        "BATCH_SIZE": "100"
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
       }
-    }    
+    },
+    {
+      "name": "fixlen_20_qwen3-embedding-0.6b_sglang-online",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "env": {
+        "MODEL": "qwen3-embedding-0.6b",
+        "BACKEND": "sglang",
+        "NUMACTL_CORES":"",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "HOST": "0.0.0.0",
+        "PORT": "30000",
+        "BASE_URL": "http://127.0.0.1:30000",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    },
+    {
+      "name": "fixlen_20_qwen3-embedding-0.6b_vllm-http",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "env": {
+        "MODEL": "qwen3-embedding-0.6b",
+        "BACKEND": "vllm-http",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    }        
   ]
 }

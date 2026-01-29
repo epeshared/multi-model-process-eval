@@ -66,7 +66,7 @@ python -m sglang.launch_server \
   --host "$HOST" --port "$PORT" \
   --skip-server-warmup \
   --tp 1 \
-  --dtype float16 \
+  --dtype bfloat16 \
   --enable-torch-compile \
   --torch-compile-max-bs "$BATCH_SIZE" \
   --attention-backend intel_amx \

@@ -35,6 +35,7 @@ class Job:
     timeout_sec: Optional[float]
     warmup_runs: int
     restart_servers: bool
+    stop_server_after_job: bool
 
 
 def _parse_bool(v: Any, *, default: bool = False) -> bool:
@@ -77,6 +78,36 @@ class RunningServer:
     started_by_runner: bool
     log_path: Path
     tee_thread: Optional[threading.Thread] = None
+
+
+def _teardown_server(rs: RunningServer) -> None:
+    if not rs.started_by_runner:
+        return
+    proc = rs.proc
+    if proc is None:
+        return
+    try:
+        proc.send_signal(signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    try:
+        proc.wait(timeout=10.0)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    t = rs.tee_thread
+    if t is not None:
+        try:
+            t.join(timeout=2.0)
+        except Exception:
+            pass
 
 
 def _utc_now_compact() -> str:
@@ -969,6 +1000,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
         raise SystemExit("defaults.warmup_runs must be an integer >= 0")
 
     default_restart_servers = _parse_bool(defaults.get("restart_servers"), default=False)
+    default_stop_server_after_job = _parse_bool(defaults.get("stop_server_after_job"), default=False)
     result_dir = Path(defaults.get("result_dir") or "scripts/auto-test/embedding/result")
     timeout_sec = defaults.get("timeout_sec")
     timeout_sec = float(timeout_sec) if timeout_sec is not None else None
@@ -1000,6 +1032,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
             raise SystemExit(f"jobs[{name}].warmup_runs must be an integer >= 0")
 
         restart_servers = _parse_bool(j.get("restart_servers"), default=default_restart_servers)
+        stop_server_after_job = _parse_bool(j.get("stop_server_after_job"), default=default_stop_server_after_job)
 
         jobs.append(
             Job(
@@ -1010,6 +1043,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
                 timeout_sec=job_timeout_sec,
                 warmup_runs=warmup_runs,
                 restart_servers=restart_servers,
+                stop_server_after_job=stop_server_after_job,
             )
         )
 
@@ -1034,6 +1068,11 @@ def main() -> int:
         "--restart-servers",
         action="store_true",
         help="If a local server is already listening on the configured port, terminate it and start a fresh one",
+    )
+    ap.add_argument(
+        "--stop-servers-after-job",
+        action="store_true",
+        help="Shutdown any server started by the runner after each job completes (useful when jobs use different MODEL_DIR/SERVED_MODEL_NAME)",
     )
     ap.add_argument(
         "--reparse-run-id",
@@ -1208,6 +1247,7 @@ def main() -> int:
             base_url = _norm_base_url(job.env.get("BASE_URL") or "")
 
             server_info: Dict[str, Any] = {}
+            job_server_key: str = ""
             if backend in servers and base_url:
                 effective_restart_servers = bool(args.restart_servers) or bool(job.restart_servers)
                 rs = _ensure_server(
@@ -1223,6 +1263,7 @@ def main() -> int:
                     running=running_servers,
                 )
                 if rs is not None:
+                    job_server_key = _server_key(servers[backend], base_url)
                     server_info = {
                         "backend": backend,
                         "base_url": base_url,
@@ -1331,6 +1372,15 @@ def main() -> int:
                     "metrics_path": str(metrics_path),
                 }
             )
+
+            # Optional: stop the server after each job so subsequent jobs can start with different env/model.
+            if (bool(args.stop_servers_after_job) or bool(job.stop_server_after_job)) and job_server_key:
+                rs = running_servers.get(job_server_key)
+                if rs is not None and rs.started_by_runner:
+                    if args.tee:
+                        print(f"[server:{rs.spec.backend}] stopping after job={job.name}")
+                    _teardown_server(rs)
+                    running_servers.pop(job_server_key, None)
 
         if not args.dry_run:
             _append_csv(summary_csv, csv_rows, csv_fields)
