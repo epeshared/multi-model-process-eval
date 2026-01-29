@@ -9,7 +9,7 @@ echo "WORK_HOME=$WORK_HOME"
 ###############################################
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-base-patch32"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
-MODEL_DIR="/home/xtang//models/Qwen/Qwen3-Embedding-4B"
+MODEL_DIR=${MODEL_DIR:-"/home/xtang//models/Qwen/Qwen3-Embedding-4B"}
 # MODEL_DIR="$WORK_HOME/models/Qwen/Qwen3-Embedding-0.6B"
 ###############################################
 echo "Using model: $MODEL_DIR"
@@ -17,8 +17,11 @@ echo "Using model: $MODEL_DIR"
 
 
 # ===== Batch Size =====
-BATCH_SIZE=16
+BATCH_SIZE=${BATCH_SIZE:-16}
 echo "Batch size = $BATCH_SIZE"
+
+HOST=${HOST:-0.0.0.0}
+PORT=${PORT:-30000}
 
 # ===== 绑核与启动 =====
 # numactl -C 0-15 \
@@ -29,7 +32,7 @@ python -m sglang.launch_server \
    --disable-overlap-schedule \
    --is-embedding \
    --device cuda \
-   --host 0.0.0.0 --port 30000 \
+   --host "$HOST" --port "$PORT" \
    --skip-server-warmup \
    --tp 1 \
    --torch-compile-max-bs "$BATCH_SIZE" \

@@ -11,7 +11,7 @@ echo "WORK_HOME=$WORK_HOME"
 # MODEL_DIR="$WORK_HOME/models/openai/clip-vit-large-patch14-336"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-4B"
 # MODEL_DIR="/home/xtang/models/Qwen/Qwen3-Embedding-0.6B"
-MODEL_DIR="/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"
+MODEL_DIR=${MODEL_DIR:-"/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16"}
 ###############################################
 echo "Using model: $MODEL_DIR"
 
@@ -48,8 +48,11 @@ export LD_PRELOAD="${PRELOAD_JOIN}${LD_PRELOAD:+:$LD_PRELOAD}"
 export MALLOC_ARENA_MAX=1
 
 # ===== Batch Size =====
-BATCH_SIZE=16
+BATCH_SIZE=${BATCH_SIZE:-16}
 echo "Batch size = $BATCH_SIZE"
+
+HOST=${HOST:-0.0.0.0}
+PORT=${PORT:-30000}
 
 # ===== 绑核与启动 =====
 python -m sglang.launch_server \
@@ -60,7 +63,7 @@ python -m sglang.launch_server \
   --is-embedding \
   --enable-multimodal \
   --device cpu \
-  --host 0.0.0.0 --port 30000 \
+  --host "$HOST" --port "$PORT" \
   --skip-server-warmup \
   --tp 1 \
   --dtype float16 \

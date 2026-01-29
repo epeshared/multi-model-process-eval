@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "description": "Auto-test for scripts/embedding/run_fix_token_len.sh (writes raw logs + parsed tps/latency into scripts/auto-test/embedding/result).",
+  "script_aliases": {
+    "run_fix_token_len": "scripts/embedding/run_fix_token_len.sh"
+  },
+  "defaults": {
+    "cwd": ".",
+    "result_dir": "scripts/auto-test/embedding/result/fix_token_len",
+    "timeout_sec": 21600,
+    "restart_servers": true,
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "servers": {
+    "vllm-http": {
+      "enabled": true,
+      "start_script": "scripts/embedding/vllm/start_vllm_server.sh",
+      "cwd": "scripts/embedding/vllm",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "SERVED_MODEL_NAME": "SERVED_MODEL_NAME",
+        "HOST": "HOST",
+        "PORT": "PORT"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    }
+  },
+  "jobs": [
+    {
+      "name": "fixlen_512_youtu-embedding_vllm-http",
+      "script": "run_fix_token_len",
+      "args": [
+        "512"
+      ],
+      "warmup_runs": 0,
+      "env": {
+        "MODEL": "youtu-embedding",
+        "BACKEND": "vllm-http",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/tencent/youtu-embedding-fp16",
+        "SERVED_MODEL_NAME": "sn-large-multi-language-v0.2.5",
+        "MODEL_ID": "sn-large-multi-language-v0.2.5",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "MODE": "input_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100"
+      }
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "description": "Auto-test for scripts/embedding/mteb/run_mteb.sh. Metrics are parsed from OUTPUT_FOLDER/results/<task>.json (embedding_stats.tps_texts_per_s + evaluation_time).",
+  "script_aliases": {
+    "run_mteb": "scripts/embedding/mteb/run_mteb.sh"
+  },
+  "defaults": {
+    "cwd": ".",
+    "result_dir": "scripts/auto-test/embedding/result/mteb",
+    "timeout_sec": 21600,
+    "restart_servers": true,
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "servers": {
+    "sglang": {
+      "enabled": true,
+      "start_script": "scripts/embedding/sglang/start_sglang_server.sh",
+      "cwd": "scripts/embedding/sglang",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "HOST": "HOST",
+        "PORT": "PORT",
+        "BATCH_SIZE": "SERVER_BATCH_SIZE"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1200,
+        "interval_sec": 2
+      }
+    },
+    "vllm-http": {
+      "enabled": true,
+      "start_script": "scripts/embedding/vllm/start_vllm_server.sh",
+      "cwd": "scripts/embedding/vllm",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "SERVED_MODEL_NAME": "SERVED_MODEL_NAME",
+        "HOST": "HOST",
+        "PORT": "PORT"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    }
+  },
+  "jobs": [
+    {
+      "name": "mteb_STSBenchmark_qwen3-embedding-4b_vllm-http",
+      "script": "run_mteb",
+      "args": [
+        "STSBenchmark"
+      ],
+      "warmup_runs": 0,
+      "env": {
+        "BACKEND": "vllm-http",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
+        "MODEL_ID": "Qwen3-Embedding-4B",
+        "SERVER_BATCH_SIZE": "16",
+        "TASKS": "STSBenchmark",
+        "OUTPUT_FOLDER": "scripts/embedding/mteb",
+        "OVERWRITE": "1",
+        "CLEAR_CACHE": "1",
+        "PRUNE_OUTPUT": "1"
+      }
+    }
+  ]
+}
