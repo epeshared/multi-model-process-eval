@@ -425,22 +425,23 @@ def _ensure_server(
         interval_sec=0.1,
         probe_model_id=probe_model_id,
     ):
-        if restart_servers:
-            # If it is still ready after a restart attempt, treat as external and proceed.
-            if tee:
-                print(f"[server:{spec.backend}] still running after restart attempt; treating as external")
-        else:
-            if tee:
-                print(f"[server:{spec.backend}] already running at {base_url} (external); will not start")
-            rs = RunningServer(
-                spec=spec,
-                base_url=base_url,
-                proc=None,
-                started_by_runner=False,
-                log_path=result_dir / f"{run_id}_{idx:03d}_server_{_sanitize_filename(spec.backend)}.external.log",
+        if restart_servers and not dry_run:
+            raise SystemExit(
+                f"restart_servers requested but server is still responding at {base_url}. "
+                "Please stop it manually or disable restart_servers for this job."
             )
-            running[key] = rs
-            return rs
+
+        if tee:
+            print(f"[server:{spec.backend}] already running at {base_url} (external); will not start")
+        rs = RunningServer(
+            spec=spec,
+            base_url=base_url,
+            proc=None,
+            started_by_runner=False,
+            log_path=result_dir / f"{run_id}_{idx:03d}_server_{_sanitize_filename(spec.backend)}.external.log",
+        )
+        running[key] = rs
+        return rs
 
     script_path = (REPO_ROOT / spec.start_script).resolve()
     if not script_path.exists():
@@ -911,6 +912,53 @@ def _resolve_script(script_aliases: Dict[str, str], key: str) -> Path:
     return p
 
 
+def _normalize_job_args(*, script: str, raw_args: Any, job_name: str) -> List[str]:
+    """Normalize config args into a CLI argv list.
+
+    Supported config formats:
+      - args: ["512"]  (legacy positional list)
+      - args: {"token_len": 512} (named args; converted to positional for known scripts)
+    """
+
+    if raw_args is None:
+        return []
+
+    # Legacy list-of-positional
+    if isinstance(raw_args, list):
+        return [str(a) for a in raw_args]
+
+    # Named args object
+    if isinstance(raw_args, dict):
+        # Script-specific mapping (make the config self-describing).
+        if script == "run_fix_token_len":
+            # run_fix_token_len.sh <TOKEN_LEN>
+            for k in ("token_len", "input_len", "seq_len", "length", "n_tokens"):
+                if k in raw_args:
+                    return [str(raw_args[k])]
+            # Fallback: first value in insertion order.
+            if raw_args:
+                return [str(next(iter(raw_args.values())))]
+            return []
+
+        if script == "run_mteb":
+            # run_mteb.sh <TASK>
+            if "task" in raw_args:
+                return [str(raw_args["task"])]
+            if "tasks" in raw_args:
+                # Keep as a single argument; env TASKS is the preferred multi-task interface.
+                return [str(raw_args["tasks"])]
+            if raw_args:
+                return [str(next(iter(raw_args.values())))]
+            return []
+
+        # Generic: keep insertion order as positional.
+        return [str(v) for v in raw_args.values()]
+
+    raise SystemExit(
+        f"Job {job_name} args must be a list or an object (got {type(raw_args).__name__})"
+    )
+
+
 def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
     defaults = cfg.get("defaults") or {}
     default_env = {str(k): str(v) for k, v in (defaults.get("env") or {}).items()}
@@ -941,9 +989,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
         script = str(j.get("script") or "")
         if not script:
             raise SystemExit(f"Job {name} missing script")
-        args = j.get("args") or []
-        if not isinstance(args, list):
-            raise SystemExit(f"Job {name} args must be a list")
+        args = _normalize_job_args(script=script, raw_args=j.get("args"), job_name=name)
         env = _merge_env(default_env, {str(k): str(v) for k, v in (j.get("env") or {}).items()})
         job_timeout = j.get("timeout_sec")
         job_timeout_sec = float(job_timeout) if job_timeout is not None else timeout_sec
@@ -959,7 +1005,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
             Job(
                 name=name,
                 script=script,
-                args=[str(a) for a in args],
+                args=args,
                 env=env,
                 timeout_sec=job_timeout_sec,
                 warmup_runs=warmup_runs,

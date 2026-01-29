@@ -1,0 +1,156 @@
+WORK_HOME=/mnt/nvme2n1p1/xtang/multi-model-process-eval/scripts/embedding
+Using model: /mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B
+python=/root/miniforge3/envs/xtang-embedding-cpu/bin/python
+vllm 0.14.0+cpu
+openai 2.14.0
+torch 2.9.1+cpu
+OK: torch.cuda.is_available() == False (CPU-only torch).
+WARN: vLLM api_server has no --device flag; relying on CUDA_VISIBLE_DEVICES='' only.
+LD_PRELOAD=/root/miniforge3/envs/xtang-embedding-cpu/lib/libtcmalloc_minimal.so.4:/root/miniforge3/envs/xtang-embedding-cpu/lib/libiomp5.so
+Launching vLLM server (CPU-only):
+  python  -m  vllm.entrypoints.openai.api_server  --model  /mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B  --served-model-name  Qwen3-Embedding-4B  --trust-remote-code  --enforce-eager  --runner  pooling  --host  0.0.0.0  --port  9090  --tensor-parallel-size  1  --max-model-len  8192  --dtype  bfloat16
+OpenAI base URL: http://0.0.0.0:9090/v1
+Logs: /mnt/nvme2n1p1/xtang/multi-model-process-eval/scripts/embedding/vllm/vllm_logs/vllm_server.log
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [api_server.py:1272] vLLM API server version 0.14.0
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [utils.py:263] non-default args: {'host': '0.0.0.0', 'port': 9090, 'model': '/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B', 'runner': 'pooling', 'trust_remote_code': True, 'dtype': 'bfloat16', 'max_model_len': 8192, 'enforce_eager': True, 'served_model_name': ['Qwen3-Embedding-4B']}
+[0;36m(APIServer pid=78231)[0;0m The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[0;36m(APIServer pid=78231)[0;0m The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [model.py:859] Resolved `--convert auto` to `--convert embed`. Pass the value explicitly to silence this message.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [model.py:530] Resolved architecture: Qwen3ForCausalLM
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [config.py:775] Found sentence-transformers modules configuration.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [config.py:802] Found pooling configuration.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [model.py:1545] Using max model len 8192
+[0;36m(APIServer pid=78231)[0;0m WARNING 01-29 10:59:03 [cpu.py:157] VLLM_CPU_KVCACHE_SPACE not set. Using 377.65 GiB for KV cache.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=2048.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [vllm.py:630] Asynchronous scheduling is enabled.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:03 [vllm.py:637] Disabling NCCL for DP synchronization when using async scheduling.
+[0;36m(APIServer pid=78231)[0;0m WARNING 01-29 10:59:03 [vllm.py:665] Enforce eager set, overriding optimization level to -O0
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:08 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B', speculative_config=None, tokenizer='/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen3-Embedding-4B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=PoolerConfig(pooling_type=None, seq_pooling_type='LAST', tok_pooling_type='ALL', normalize=None, dimensions=None, enable_chunked_processing=None, max_embed_len=None, softmax=None, activation=None, use_activation=True, logit_bias=None, step_tag_id=None, returned_token_ids=None), compilation_config={'level': None, 'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:180] auto thread-binding list (id, physical core): [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (10, 10), (11, 11), (12, 12), (13, 13), (14, 14), (15, 15)]
+[W129 10:59:09.171706443 utils.cpp:103] Warning: NUMA binding: Using MEMBIND policy for memory allocation on the NUMA nodes (0). Memory allocations will be strictly bound to these NUMA nodes. (function init_cpu_threads_env)
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] OMP threads binding of Process 78325:
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78325, core 0
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78434, core 1
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78435, core 2
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78436, core 3
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78437, core 4
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78438, core 5
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78439, core 6
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78440, core 7
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78441, core 8
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78442, core 9
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78443, core 10
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78444, core 11
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78445, core 12
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78446, core 13
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78447, core 14
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 	OMP tid: 78448, core 15
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_worker.py:86] 
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.16.116.208:49755 backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:09 [cpu_model_runner.py:55] Starting to load model /mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B...
+[0;36m(EngineCore_DP0 pid=78325)[0;0m 
+Loading safetensors checkpoint shards:   0% Completed | 0/2 [00:00<?, ?it/s]
+[0;36m(EngineCore_DP0 pid=78325)[0;0m 
+Loading safetensors checkpoint shards:  50% Completed | 1/2 [00:01<00:01,  1.94s/it]
+[0;36m(EngineCore_DP0 pid=78325)[0;0m 
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:03<00:00,  1.64s/it]
+[0;36m(EngineCore_DP0 pid=78325)[0;0m 
+Loading safetensors checkpoint shards: 100% Completed | 2/2 [00:03<00:00,  1.68s/it]
+[0;36m(EngineCore_DP0 pid=78325)[0;0m 
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:13 [default_loader.py:291] Loading weights took 3.49 seconds
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:13 [kv_cache_utils.py:1305] GPU KV cache size: 2,749,824 tokens
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:13 [kv_cache_utils.py:1310] Maximum concurrency for 8,192 tokens per request: 335.67x
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:44 [cpu_model_runner.py:65] Warming up model for the compilation...
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:44 [cpu_model_runner.py:75] Warming up done.
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:44 [core.py:273] init engine (profile, create kv cache, warmup model) took 30.70 seconds
+[0;36m(EngineCore_DP0 pid=78325)[0;0m INFO 01-29 10:59:45 [vllm.py:630] Asynchronous scheduling is disabled.
+[0;36m(EngineCore_DP0 pid=78325)[0;0m WARNING 01-29 10:59:45 [vllm.py:672] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[0;36m(EngineCore_DP0 pid=78325)[0;0m WARNING 01-29 10:59:45 [cpu.py:157] VLLM_CPU_KVCACHE_SPACE not set. Using 377.65 GiB for KV cache.
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [api_server.py:1014] Supported tasks: ['token_embed', 'embed']
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [api_server.py:1346] Starting vLLM API server 0 on http://0.0.0.0:9090
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:38] Available routes are:
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /openapi.json, Methods: HEAD, GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /docs, Methods: HEAD, GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /redoc, Methods: HEAD, GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /tokenize, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /detokenize, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /pause, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /resume, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /is_paused, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /metrics, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /health, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /load, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/models, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /version, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/responses, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/messages, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/completions, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/audio/transcriptions, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/audio/translations, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /ping, Methods: GET
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /ping, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /invocations, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /classify, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/embeddings, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /score, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/score, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /rerank, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v1/rerank, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /v2/rerank, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:46 [launcher.py:46] Route: /pooling, Methods: POST
+[0;36m(APIServer pid=78231)[0;0m INFO:     Started server process [78231]
+[0;36m(APIServer pid=78231)[0;0m INFO:     Waiting for application startup.
+[0;36m(APIServer pid=78231)[0;0m INFO:     Application startup complete.
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46302 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 10:59:56 [loggers.py:257] Engine 000: Avg prompt throughput: 446.1 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:06 [loggers.py:257] Engine 000: Avg prompt throughput: 923.8 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46310 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:16 [loggers.py:257] Engine 000: Avg prompt throughput: 454.5 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:26 [loggers.py:257] Engine 000: Avg prompt throughput: 607.3 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:46084 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:36 [loggers.py:257] Engine 000: Avg prompt throughput: 603.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:46 [loggers.py:257] Engine 000: Avg prompt throughput: 767.5 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO:     127.0.0.1:38102 - "POST /v1/embeddings HTTP/1.1" 200 OK
+[0;36m(APIServer pid=78231)[0;0m INFO 01-29 11:00:56 [loggers.py:257] Engine 000: Avg prompt throughput: 754.3 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%

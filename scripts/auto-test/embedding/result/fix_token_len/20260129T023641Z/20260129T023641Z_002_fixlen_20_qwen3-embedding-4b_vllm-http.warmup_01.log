@@ -1,0 +1,43 @@
+[run_embedding_synth] MODEL=qwen3-embedding-4b
+[run_embedding_synth] MODEL_ID=vllm-http
+[run_embedding_synth] BACKEND=vllm-http
+[run_embedding_synth] MAX_SAMPLES=1000
+[run_embedding_synth] MODE=input_len
+[run_embedding_synth] SYNTHETIC_INPUT_LEN=20
+[run_embedding_synth] SYNTHETIC_SEED=12345
+[run_embedding_synth] BATCH_SIZE=100
+[run_embedding_synth] DEVICE=cpu
+[run_embedding_synth] DTYPE=bfloat16
+[run_embedding_synth] USE_AMX=TRUE
+[run_embedding_synth] BASE_URL=http://127.0.0.1:9090
+[run_embedding_synth] WARMUP_SAMPLES=1
+[run_embedding_synth] PRINT_MODEL_INFO=0
+[run_embedding_synth] PROFILE=0
+[run_embedding_synth] PROFILE_RECORD_SHAPES=0
+[run_embedding_synth] PROFILE_ACTIVITIES=CPU,CUDA
+[run_embedding_synth] PROFILE_OUT_DIR=<unset>
+[run_embedding_synth] PROFILE_OUT_NAME=embedding_profile
+[run_embedding_synth] PROFILE_STRICT=0
+[run_embedding_synth] ENCODING_FORMAT=base64
+[run_embedding_synth] EXTRA_ARGS=<none>
+Traceback (most recent call last):
+  File "/mnt/nvme2n1p1/xtang/multi-model-process-eval/scripts/embedding/run_embedding.py", line 563, in <module>
+    main()
+  File "/mnt/nvme2n1p1/xtang/multi-model-process-eval/scripts/embedding/run_embedding.py", line 499, in main
+    result = embed_with_session(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/root/miniforge3/envs/xtang-embedding-cpu/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme2n1p1/xtang/multi-model-process-eval/src/tasks/embedding.py", line 396, in embed_with_session
+    return session.encode(
+           ^^^^^^^^^^^^^^^
+  File "/root/miniforge3/envs/xtang-embedding-cpu/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme2n1p1/xtang/multi-model-process-eval/src/tasks/embedding_backends/vllm_http.py", line 142, in encode
+    vecs = self._post_embeddings(batch)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/nvme2n1p1/xtang/multi-model-process-eval/src/tasks/embedding_backends/vllm_http.py", line 124, in _post_embeddings
+    raise RuntimeError(f"vLLM HTTP embeddings failed after {self.max_retries} attempts: {last_err}")
+RuntimeError: vLLM HTTP embeddings failed after 3 attempts: vLLM embeddings endpoint not found (tried /v1/embeddings and /embeddings)
