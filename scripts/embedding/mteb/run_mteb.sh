@@ -103,6 +103,10 @@ fi
 
 cd "${ROOT_DIR}"
 
+# Ensure repo root is importable as a module path (needed when environments set PYTHONSAFEPATH
+# or otherwise do not add the current working directory to sys.path).
+export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+
 PYTHON_BIN="python"
 if [[ -x "${ROOT_DIR}/.venv/bin/python" ]]; then
   PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
