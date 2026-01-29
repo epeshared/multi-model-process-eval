@@ -21,7 +21,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "",
+        "cores": "0-15",
         "cpunodebind": "",
         "membind": ""
       },
@@ -44,7 +44,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "",
+        "cores": "0-15",
         "cpunodebind": "",
         "membind": ""
       },
@@ -68,7 +68,7 @@
       "args": {
         "task": "STSBenchmark"
       },
-      "warmup_runs": 0,
+      "warmup_runs": 2,
       "env": {
         "BACKEND": "vllm-http",
         "BASE_URL": "http://127.0.0.1:9090",
@@ -80,13 +80,89 @@
         "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",
         "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
         "MODEL_ID": "Qwen3-Embedding-4B",
-        "SERVER_BATCH_SIZE": "16",
         "TASKS": "STSBenchmark",
-        "OUTPUT_FOLDER": "scripts/embedding/mteb",
+        "OUTPUT_FOLDER": "scripts/auto-test/embedding/result/mteb",
         "OVERWRITE": "1",
         "CLEAR_CACHE": "1",
         "PRUNE_OUTPUT": "1"
-      }
-    }
+      }      
+    },
+    {
+      "name": "mteb_STSBenchmark_qwen3-embedding-0.6b_vllm-http",
+      "script": "run_mteb",
+      "args": {
+        "task": "STSBenchmark"
+      },
+      "warmup_runs": 2,
+      "env": {
+        "BACKEND": "vllm-http",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "TASKS": "STSBenchmark",
+        "OUTPUT_FOLDER": "scripts/auto-test/embedding/result/mteb",
+        "OVERWRITE": "1",
+        "CLEAR_CACHE": "1",
+        "PRUNE_OUTPUT": "1"
+      }     
+    },
+    {
+      "name": "mteb_STSBenchmark_qwen3-embedding-4b_sglang-http",
+      "script": "run_mteb",
+      "args": {
+        "task": "STSBenchmark"
+      },
+      "warmup_runs": 2,
+      "env": {
+        "BACKEND": "sglang",
+        "HOST": "0.0.0.0",
+        "PORT": "30000",
+        "BASE_URL": "http://127.0.0.1:30000",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
+        "MODEL_ID": "Qwen3-Embedding-4B",
+        "SERVER_BATCH_SIZE": "16",
+        "TASKS": "STSBenchmark",
+        "OUTPUT_FOLDER": "scripts/auto-test/embedding/result/mteb",
+        "OVERWRITE": "1",
+        "CLEAR_CACHE": "1",
+        "PRUNE_OUTPUT": "1"
+      }      
+    },
+    {
+      "name": "mteb_STSBenchmark_qwen3-embedding-0.6b_sglang-http",
+      "script": "run_mteb",
+      "args": {
+        "task": "STSBenchmark"
+      },
+      "warmup_runs": 2,
+      "env": {
+        "BACKEND": "sglang",
+        "HOST": "0.0.0.0",
+        "PORT": "30000",        
+        "BASE_URL": "http://127.0.0.1:30000",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "SERVER_BATCH_SIZE": "16",
+        "TASKS": "STSBenchmark",
+        "OUTPUT_FOLDER": "scripts/auto-test/embedding/result/mteb",
+        "OVERWRITE": "1",
+        "CLEAR_CACHE": "1",
+        "PRUNE_OUTPUT": "1"
+      }     
+    } 
   ]
 }

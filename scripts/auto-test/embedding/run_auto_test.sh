@@ -11,6 +11,7 @@ CONFIG_ARG=()
 # Examples:
 #   ./run_auto_test.sh config_yahoo.json
 #   ./run_auto_test.sh config_mteb.json --tee --only mteb_STSBenchmark_qwen3-embedding-4b_vllm-http
+#   ./run_auto_test.sh config_mteb.json --tee --skip mteb_STSBenchmark_qwen3-embedding-4b_vllm-http
 if [[ $# -gt 0 ]] && [[ "${1:-}" != "-"* ]]; then
 	CANDIDATE="$1"
 	if [[ "${CANDIDATE}" == *.json ]] && [[ -f "${CANDIDATE}" ]]; then

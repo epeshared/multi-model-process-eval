@@ -78,6 +78,17 @@ class RunningServer:
     started_by_runner: bool
     log_path: Path
     tee_thread: Optional[threading.Thread] = None
+    numactl_cores: str = ""
+    numactl_cpunodebind: str = ""
+    numactl_membind: str = ""
+
+
+def _effective_numactl_for_server(*, spec: ServerSpec, job_env: Dict[str, str]) -> Tuple[str, str, str]:
+    # Priority: per-job env overrides > servers.<backend>.numactl defaults.
+    numactl_cores = (job_env.get("NUMACTL_CORES") or "").strip() or (spec.numactl_cores or "").strip()
+    numactl_cpunodebind = (job_env.get("NUMACTL_CPUNODEBIND") or "").strip() or (spec.numactl_cpunodebind or "").strip()
+    numactl_membind = (job_env.get("NUMACTL_MEMBIND") or "").strip() or (spec.numactl_membind or "").strip()
+    return numactl_cores, numactl_cpunodebind, numactl_membind
 
 
 def _teardown_server(rs: RunningServer) -> None:
@@ -435,6 +446,8 @@ def _ensure_server(
     if key in running:
         return running[key]
 
+    eff_cores, eff_cpunodebind, eff_membind = _effective_numactl_for_server(spec=spec, job_env=job.env)
+
     if tee:
         print(f"[server:{spec.backend}] checking ready: {base_url}")
 
@@ -470,6 +483,9 @@ def _ensure_server(
             proc=None,
             started_by_runner=False,
             log_path=result_dir / f"{run_id}_{idx:03d}_server_{_sanitize_filename(spec.backend)}.external.log",
+            numactl_cores=eff_cores,
+            numactl_cpunodebind=eff_cpunodebind,
+            numactl_membind=eff_membind,
         )
         running[key] = rs
         return rs
@@ -490,12 +506,7 @@ def _ensure_server(
     cmd = ["bash", str(script_path)] + list(spec.args)
 
     # Optional NUMA binding for server process.
-    # Priority: per-job env overrides > servers.<backend>.numactl defaults.
-    numactl_cores = (job.env.get("NUMACTL_CORES") or "").strip() or (spec.numactl_cores or "").strip()
-    numactl_cpunodebind = (job.env.get("NUMACTL_CPUNODEBIND") or "").strip() or (
-        spec.numactl_cpunodebind or ""
-    ).strip()
-    numactl_membind = (job.env.get("NUMACTL_MEMBIND") or "").strip() or (spec.numactl_membind or "").strip()
+    numactl_cores, numactl_cpunodebind, numactl_membind = eff_cores, eff_cpunodebind, eff_membind
 
     if numactl_cores or numactl_cpunodebind or numactl_membind:
         numactl_bin = shutil.which("numactl")
@@ -521,7 +532,16 @@ def _ensure_server(
 
     if dry_run:
         print(f"[dry-run] start-server backend={spec.backend} base_url={base_url}: {' '.join(cmd)}")
-        rs = RunningServer(spec=spec, base_url=base_url, proc=None, started_by_runner=True, log_path=log_path)
+        rs = RunningServer(
+            spec=spec,
+            base_url=base_url,
+            proc=None,
+            started_by_runner=True,
+            log_path=log_path,
+            numactl_cores=eff_cores,
+            numactl_cpunodebind=eff_cpunodebind,
+            numactl_membind=eff_membind,
+        )
         running[key] = rs
         return rs
 
@@ -574,6 +594,9 @@ def _ensure_server(
         started_by_runner=True,
         log_path=log_path,
         tee_thread=tee_thread,
+        numactl_cores=eff_cores,
+        numactl_cpunodebind=eff_cpunodebind,
+        numactl_membind=eff_membind,
     )
     running[key] = rs
     return rs
@@ -1058,6 +1081,12 @@ def main() -> int:
         help="Path to config JSON",
     )
     ap.add_argument("--only", action="append", default=[], help="Only run jobs with this exact name (repeatable)")
+    ap.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        help="Skip jobs with this exact name (repeatable)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Print commands but do not execute")
     ap.add_argument(
         "--tee",
@@ -1100,13 +1129,15 @@ def main() -> int:
             raise SystemExit(f"No metrics files found for run_id={run_id} in {result_dir}")
 
         csv_fields = [
-            "run_id",
             "job_name",
             "script",
             "exit_code",
             "backend",
             "model",
             "model_id",
+            "numactl_cores",
+            "numactl_cpunodebind",
+            "numactl_membind",
             "tps",
             "latency_sec",
             "avg_batch_time_sec",
@@ -1130,6 +1161,27 @@ def main() -> int:
             model = str(rec.get("model") or "")
             model_id = str(rec.get("model_id") or "")
 
+            env = rec.get("env") or {}
+            server_info = rec.get("server") or {}
+
+            # Prefer the effective server numactl recorded at runtime; else recompute from env + config defaults.
+            numactl_cores = server_info.get("numactl_cores") or env.get("NUMACTL_CORES")
+            numactl_cpunodebind = server_info.get("numactl_cpunodebind") or env.get("NUMACTL_CPUNODEBIND")
+            numactl_membind = server_info.get("numactl_membind") or env.get("NUMACTL_MEMBIND")
+
+            if (not (numactl_cores or numactl_cpunodebind or numactl_membind)) and backend in servers:
+                # Only fill from server defaults if this script/backend likely uses a server.
+                try:
+                    eff_cores, eff_cpunodebind, eff_membind = _effective_numactl_for_server(
+                        spec=servers[backend],
+                        job_env={str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {},
+                    )
+                    numactl_cores = numactl_cores or eff_cores
+                    numactl_cpunodebind = numactl_cpunodebind or eff_cpunodebind
+                    numactl_membind = numactl_membind or eff_membind
+                except Exception:
+                    pass
+
             log_path = Path(str(rec.get("log_path") or ""))
             metrics: Dict[str, Any]
             if script in ("run_embedding_yahoo", "run_fix_token_len"):
@@ -1139,7 +1191,6 @@ def main() -> int:
                 else:
                     metrics = {"parse_error": f"missing_log:{log_path}"}
             elif script == "run_mteb":
-                env = rec.get("env") or {}
                 tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
                 if not tasks:
                     # Fallback: try to infer from cmd[2] (bash script arg)
@@ -1160,13 +1211,15 @@ def main() -> int:
             recs.append(rec)
             csv_rows.append(
                 {
-                    "run_id": rec.get("run_id"),
                     "job_name": rec.get("job_name"),
                     "script": script,
                     "exit_code": rec.get("exit_code"),
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,
+                    "numactl_cores": numactl_cores,
+                    "numactl_cpunodebind": numactl_cpunodebind,
+                    "numactl_membind": numactl_membind,
                     "tps": rec.get("tps"),
                     "latency_sec": rec.get("latency_sec"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
@@ -1201,18 +1254,24 @@ def main() -> int:
     if only_set:
         jobs = [j for j in jobs if j.name in only_set]
 
+    skip_set = set(args.skip or [])
+    if skip_set:
+        jobs = [j for j in jobs if j.name not in skip_set]
+
     if not jobs:
         print("No jobs selected.", file=sys.stderr)
         return 2
 
     csv_fields = [
-        "run_id",
         "job_name",
         "script",
         "exit_code",
         "backend",
         "model",
         "model_id",
+        "numactl_cores",
+        "numactl_cpunodebind",
+        "numactl_membind",
         "tps",
         "latency_sec",
         "avg_batch_time_sec",
@@ -1269,6 +1328,9 @@ def main() -> int:
                         "base_url": base_url,
                         "started_by_runner": rs.started_by_runner,
                         "server_log_path": str(rs.log_path),
+                        "numactl_cores": rs.numactl_cores,
+                        "numactl_cpunodebind": rs.numactl_cpunodebind,
+                        "numactl_membind": rs.numactl_membind,
                     }
 
             if args.dry_run:
@@ -1354,13 +1416,15 @@ def main() -> int:
 
             csv_rows.append(
                 {
-                    "run_id": run_id,
                     "job_name": job.name,
                     "script": job.script,
                     "exit_code": exit_code,
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,
+                    "numactl_cores": (server_info.get("numactl_cores") or job.env.get("NUMACTL_CORES")),
+                    "numactl_cpunodebind": (server_info.get("numactl_cpunodebind") or job.env.get("NUMACTL_CPUNODEBIND")),
+                    "numactl_membind": (server_info.get("numactl_membind") or job.env.get("NUMACTL_MEMBIND")),
                     "tps": merged.get("tps"),
                     "latency_sec": merged.get("latency_sec"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
