@@ -30,6 +30,37 @@ MODEL=qwen3-1.7b MODEL_ID=/mnt/models/Qwen/Qwen3-1.7B BACKEND=sglang BASE_URL=ht
 SYNTHETIC_NUM_PROMPTS=50 SYNTHETIC_TOKEN_LEN=64 BATCH_SIZE=2 MAX_NEW_TOKENS=128 ./run_qwen3_test.sh
 ```
 
+## vLLM built-in style benchmark (P50/P99/QPS/TTFT/TPOT)
+
+If you want serving-style metrics (QPS + latency percentiles) directly against the vLLM **OpenAI-compatible** server,
+use the benchmark script under `scripts/qwen3/vllm`.
+
+### 1) Start vLLM server
+
+```bash
+cd scripts/qwen3/vllm
+MODEL_DIR=/path/to/Qwen3-0.6B SERVED_MODEL_NAME=qwen3-0.6b ./start_vllm_server.sh
+```
+
+### 2) Run benchmark
+
+```bash
+cd scripts/qwen3/vllm
+
+# Quick run: stream=true enables TTFT; TPOT needs streamed usage support
+BASE_URL=http://127.0.0.1:8000 MODEL=qwen3-0.6b NUM_PROMPTS=200 CONCURRENCY=16 MAX_TOKENS=256 \
+	./run_benchmark_openai_server.sh
+
+# Save raw per-request results
+SAVE_JSON=./results/qwen3_bench.json ./run_benchmark_openai_server.sh
+```
+
+Notes:
+
+- `MODEL` must match the server's `--served-model-name`.
+- TTFT requires `STREAM=1` (default).
+- TPOT requires the server to stream `usage` (best-effort via `stream_options={"include_usage": true}`); otherwise TPOT will be `null`.
+
 ## TTFT / TPOT
 
 This repo prints TTFT/TPOT in `scripts/qwen3/run_qwen3_test.sh` (two extra summary lines) and also includes them in the JSON output from `scripts/qwen3/run_qwen3.py`.
