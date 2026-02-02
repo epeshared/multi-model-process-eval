@@ -191,6 +191,11 @@ def main() -> None:
     # Encoding behavior
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=512)
+    parser.add_argument(
+        "--tokenizer-id",
+        default="",
+        help="Optional HuggingFace repo id or local path for tokenizer; used only to compute seq_len/token_len stats.",
+    )
     parser.add_argument("--no-normalize", action="store_true")
     parser.add_argument("--query-prefix", default="")
     parser.add_argument("--document-prefix", default="")
@@ -270,6 +275,7 @@ def main() -> None:
         normalize=not args.no_normalize,
         batch_size=args.batch_size,
         max_length=args.max_length,
+        tokenizer_id=str(args.tokenizer_id or ""),
         query_prefix=args.query_prefix,
         document_prefix=args.document_prefix,
         profile=args.profile,
@@ -349,6 +355,22 @@ def main() -> None:
         tasks,
         cache=cache,
     )
+
+    # Print workload stats (how many texts/samples were encoded and how many batches were issued).
+    stats_after = model.get_encoding_stats() if hasattr(model, "get_encoding_stats") else {}
+    if isinstance(stats_after, dict):
+        try:
+            total_texts = int(stats_after.get("total_texts_encoded") or 0)
+            total_batches = int(stats_after.get("total_batches") or 0)
+            batch_size = int(stats_after.get("batch_size") or int(args.batch_size))
+            encode_time_s = float(stats_after.get("encode_time_s") or 0.0)
+            print(
+                "[mteb] "
+                f"total_samples={total_texts} total_batches={total_batches} "
+                f"batch_size={batch_size} encode_time_s={encode_time_s:.6f}"
+            )
+        except Exception:
+            pass
 
     # ----
     # Post-process results:

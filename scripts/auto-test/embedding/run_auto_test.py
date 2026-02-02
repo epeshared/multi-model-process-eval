@@ -919,6 +919,35 @@ def _parse_mteb_metrics(*, output_folder: Path, tasks: List[str], model_id: str,
     return results
 
 
+def _infer_token_len(*, script: str, env: Dict[str, Any]) -> str:
+    """Infer the 'token length' style parameter for reporting.
+
+    - MTEB uses MAX_LENGTH as the truncation length.
+    - run_fix_token_len uses SYNTHETIC_TOKEN_LEN (or SYNTHETIC_INPUT_LEN in input_len mode).
+    - Other scripts may leave it blank.
+    """
+
+    try:
+        if script == "run_mteb":
+            v = env.get("MAX_LENGTH")
+            # Keep consistent with scripts/embedding/mteb/run_mteb.sh and run_mteb.py defaults.
+            return str(v) if v not in (None, "") else "512"
+
+        if script == "run_fix_token_len":
+            mode = str(env.get("MODE") or "").strip().lower()
+            if mode in {"token_len", "tokens", "token", "tok"}:
+                v = env.get("SYNTHETIC_TOKEN_LEN")
+            else:
+                v = env.get("SYNTHETIC_INPUT_LEN")
+            return str(v) if v not in (None, "") else ""
+
+        # Generic fallback
+        v = env.get("MAX_LENGTH")
+        return str(v) if v not in (None, "") else ""
+    except Exception:
+        return ""
+
+
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
@@ -1138,6 +1167,7 @@ def main() -> int:
             "numactl_cores",
             "numactl_cpunodebind",
             "numactl_membind",
+            "token_len",
             "tps",
             "latency_sec",
             "avg_batch_time_sec",
@@ -1163,6 +1193,8 @@ def main() -> int:
 
             env = rec.get("env") or {}
             server_info = rec.get("server") or {}
+
+            token_len = _infer_token_len(script=script, env=env if isinstance(env, dict) else {})
 
             # Prefer the effective server numactl recorded at runtime; else recompute from env + config defaults.
             numactl_cores = server_info.get("numactl_cores") or env.get("NUMACTL_CORES")
@@ -1220,6 +1252,7 @@ def main() -> int:
                     "numactl_cores": numactl_cores,
                     "numactl_cpunodebind": numactl_cpunodebind,
                     "numactl_membind": numactl_membind,
+                    "token_len": token_len,
                     "tps": rec.get("tps"),
                     "latency_sec": rec.get("latency_sec"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
@@ -1272,6 +1305,7 @@ def main() -> int:
         "numactl_cores",
         "numactl_cpunodebind",
         "numactl_membind",
+        "token_len",
         "tps",
         "latency_sec",
         "avg_batch_time_sec",
@@ -1425,6 +1459,7 @@ def main() -> int:
                     "numactl_cores": (server_info.get("numactl_cores") or job.env.get("NUMACTL_CORES")),
                     "numactl_cpunodebind": (server_info.get("numactl_cpunodebind") or job.env.get("NUMACTL_CPUNODEBIND")),
                     "numactl_membind": (server_info.get("numactl_membind") or job.env.get("NUMACTL_MEMBIND")),
+                    "token_len": _infer_token_len(script=job.script, env=job.env),
                     "tps": merged.get("tps"),
                     "latency_sec": merged.get("latency_sec"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),

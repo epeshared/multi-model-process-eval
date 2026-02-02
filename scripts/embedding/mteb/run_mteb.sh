@@ -50,6 +50,7 @@ TIMEOUT=${TIMEOUT:-120}
 
 BATCH_SIZE=${BATCH_SIZE:-128}
 MAX_LENGTH=${MAX_LENGTH:-512}
+TOKENIZER_ID=${TOKENIZER_ID:-}
 NORMALIZE=${NORMALIZE:-1}
 QUERY_PREFIX=${QUERY_PREFIX:-}
 DOCUMENT_PREFIX=${DOCUMENT_PREFIX:-}
@@ -123,6 +124,7 @@ echo "[run_mteb] TIMEOUT=${TIMEOUT}"
 echo "[run_mteb] ENCODING_FORMAT=${ENCODING_FORMAT:-<unset>}"
 echo "[run_mteb] BATCH_SIZE=${BATCH_SIZE}"
 echo "[run_mteb] MAX_LENGTH=${MAX_LENGTH}"
+echo "[run_mteb] TOKENIZER_ID=${TOKENIZER_ID:-<unset>}"
 echo "[run_mteb] NORMALIZE=${NORMALIZE}"
 echo "[run_mteb] QUERY_PREFIX=${QUERY_PREFIX:-<unset>}"
 echo "[run_mteb] DOCUMENT_PREFIX=${DOCUMENT_PREFIX:-<unset>}"
@@ -154,6 +156,12 @@ ARGS=(
   --max-length "${MAX_LENGTH}"
   --output-folder "${OUTPUT_FOLDER}"
 )
+
+if [[ -n "${TOKENIZER_ID}" ]]; then
+  if [[ " $* " != *" --tokenizer-id "* ]]; then
+    ARGS+=(--tokenizer-id "${TOKENIZER_ID}")
+  fi
+fi
 
 case "${PRUNE_OUTPUT}" in
   1|true|TRUE|yes|YES|on|ON)

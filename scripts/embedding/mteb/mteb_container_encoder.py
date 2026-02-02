@@ -50,6 +50,7 @@ class ContainerMTEBConfig:
     max_length: int = 512
     query_prefix: str = ""
     document_prefix: str = ""
+    tokenizer_id: str = ""  # optional: HF repo id or local path for local token length stats
     profile: bool = False
     profile_kwargs: dict[str, Any] | None = None
 
@@ -74,6 +75,28 @@ class ContainerMTEBEncoder:
         self.total_texts_encoded: int = 0
         self.total_batches: int = 0
         self.total_encode_time_s: float = 0.0
+
+        # Optional token length stats (post-truncation length in tokens)
+        self._tokenizer: Any | None = None
+        self._seq_len_total: int = 0
+        self._seq_len_count: int = 0
+        self._seq_len_min: int | None = None
+        self._seq_len_max: int | None = None
+        self._seq_len_hist: list[int] | None = None
+
+        if (cfg.tokenizer_id or "").strip():
+            try:
+                from transformers import AutoTokenizer
+
+                self._tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_id, trust_remote_code=True)
+                # histogram sized by max_length (post-truncation length is <= max_length)
+                ml = int(cfg.max_length) if int(cfg.max_length) > 0 else 512
+                self._seq_len_hist = [0] * (ml + 1)
+                print(f"[mteb.encoder] tokenizer_id={cfg.tokenizer_id} (for seq_len stats)")
+            except Exception as e:
+                self._tokenizer = None
+                self._seq_len_hist = None
+                print(f"[mteb.encoder] warning: failed to load tokenizer_id={cfg.tokenizer_id}: {e}")
 
         self._session = load_embedding_session(
             cfg.model_id,
@@ -142,6 +165,40 @@ class ContainerMTEBEncoder:
             batch_texts = _as_list(batch["text"])
             texts.extend([_apply_prefix(str(t), prefix) for t in batch_texts])
 
+        # Optional: record exact post-truncation token lengths using a local tokenizer.
+        if self._tokenizer is not None and self._seq_len_hist is not None and texts:
+            try:
+                ml = len(self._seq_len_hist) - 1
+                enc = self._tokenizer(
+                    texts,
+                    add_special_tokens=True,
+                    truncation=True,
+                    max_length=ml,
+                    padding=False,
+                    return_length=True,
+                )
+                lengths = enc.get("length") if isinstance(enc, dict) else None
+                if isinstance(lengths, list):
+                    for x in lengths:
+                        try:
+                            n = int(x)
+                        except Exception:
+                            continue
+                        if n < 0:
+                            continue
+                        if n > ml:
+                            n = ml
+                        self._seq_len_total += n
+                        self._seq_len_count += 1
+                        self._seq_len_hist[n] += 1
+                        if self._seq_len_min is None or n < self._seq_len_min:
+                            self._seq_len_min = n
+                        if self._seq_len_max is None or n > self._seq_len_max:
+                            self._seq_len_max = n
+            except Exception:
+                # Best-effort; do not fail evaluation due to tokenizer stats.
+                pass
+
         start = time.perf_counter()
         embs = embed_with_session(
             self._session,
@@ -175,6 +232,36 @@ class ContainerMTEBEncoder:
             "encode_time_s": float(self.total_encode_time_s),
             "tps_texts_per_s": float(tps) if tps is not None else None,
             "normalize": bool(self.cfg.normalize),
+            "max_length": int(self.cfg.max_length),
+            "seq_len_stats": self._seq_len_stats(),
+        }
+
+    def _seq_len_stats(self) -> dict[str, Any] | None:
+        if self._seq_len_hist is None or self._seq_len_count <= 0:
+            return None
+
+        def quantile(p: float) -> int:
+            if self._seq_len_hist is None:
+                return 0
+            target = int(math.ceil(p * self._seq_len_count))
+            target = max(1, target)
+            c = 0
+            for i, n in enumerate(self._seq_len_hist):
+                c += int(n)
+                if c >= target:
+                    return i
+            return len(self._seq_len_hist) - 1
+
+        mean = float(self._seq_len_total) / float(self._seq_len_count) if self._seq_len_count > 0 else 0.0
+        return {
+            "count": int(self._seq_len_count),
+            "min": int(self._seq_len_min or 0),
+            "p50": int(quantile(0.50)),
+            "p95": int(quantile(0.95)),
+            "max": int(self._seq_len_max or 0),
+            "mean": float(mean),
+            "unit": "tokens",
+            "note": "post-truncation tokenizer length (add_special_tokens=true)",
         }
 
     def similarity(self, embeddings1: Any, embeddings2: Any) -> np.ndarray:
