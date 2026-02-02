@@ -61,6 +61,23 @@ Notes:
 - TTFT requires `STREAM=1` (default).
 - TPOT requires the server to stream `usage` (best-effort via `stream_options={"include_usage": true}`); otherwise TPOT will be `null`.
 
+## vLLM built-in benchmark (official `vllm.benchmarks.*`)
+
+If you want to run vLLM's own benchmark module directly (instead of this repo's client-side metrics script),
+use the wrapper below. It auto-detects CLI flag names across vLLM versions and forwards extra args.
+
+```bash
+cd scripts/qwen3/vllm
+
+# Requires a running vLLM OpenAI-compatible server
+BASE_URL=http://127.0.0.1:8000 MODEL=qwen3-0.6b NUM_PROMPTS=200 CONCURRENCY=16 \
+	IN_LEN=256 OUT_LEN=256 REQUEST_RATE=0 \
+	./run_vllm_builtin_benchmark_serving.sh
+
+# Pass through extra vLLM benchmark args after --
+./run_vllm_builtin_benchmark_serving.sh -- --seed 0
+```
+
 ## TTFT / TPOT
 
 This repo prints TTFT/TPOT in `scripts/qwen3/run_qwen3_test.sh` (two extra summary lines) and also includes them in the JSON output from `scripts/qwen3/run_qwen3.py`.
