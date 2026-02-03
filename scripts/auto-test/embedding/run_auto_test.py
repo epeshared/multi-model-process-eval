@@ -36,6 +36,7 @@ class Job:
     warmup_runs: int
     restart_servers: bool
     stop_server_after_job: bool
+    emon_enable: bool
 
 
 def _parse_bool(v: Any, *, default: bool = False) -> bool:
@@ -51,6 +52,73 @@ def _parse_bool(v: Any, *, default: bool = False) -> bool:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+@dataclass
+class EmonSession:
+    proc: subprocess.Popen[str]
+    out_f: Any
+    output_path: Path
+
+
+def _start_emon_session(*, output_path: Path, tee: bool, prefix: str = "") -> EmonSession:
+    emon_bin = shutil.which("emon")
+    if not emon_bin:
+        raise SystemExit("emon_enable is true but 'emon' was not found in PATH")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out_f = output_path.open("w", encoding="utf-8")
+
+    if tee:
+        print(f"{prefix}[emon] start: {emon_bin} -collect-edp > {output_path}")
+
+    proc = subprocess.Popen(
+        [emon_bin, "-collect-edp"],
+        cwd=str(output_path.parent),
+        stdout=out_f,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+    )
+    return EmonSession(proc=proc, out_f=out_f, output_path=output_path)
+
+
+def _stop_emon_session(session: EmonSession, *, tee: bool, prefix: str = "") -> None:
+    emon_bin = shutil.which("emon")
+    if not emon_bin:
+        try:
+            session.out_f.close()
+        except Exception:
+            pass
+        return
+
+    try:
+        if tee:
+            print(f"{prefix}[emon] stop: {emon_bin} -stop")
+        try:
+            session.out_f.flush()
+        except Exception:
+            pass
+
+        subprocess.run(
+            [emon_bin, "-stop"],
+            cwd=str(session.output_path.parent),
+            stdout=session.out_f,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+
+        try:
+            session.proc.wait(timeout=10.0)
+        except Exception:
+            pass
+    finally:
+        try:
+            session.out_f.close()
+        except Exception:
+            pass
 
 
 @dataclass(frozen=True)
@@ -1085,6 +1153,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
 
         restart_servers = _parse_bool(j.get("restart_servers"), default=default_restart_servers)
         stop_server_after_job = _parse_bool(j.get("stop_server_after_job"), default=default_stop_server_after_job)
+        emon_enable = _parse_bool(j.get("emon_enable"), default=False)
 
         jobs.append(
             Job(
@@ -1096,6 +1165,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
                 warmup_runs=warmup_runs,
                 restart_servers=restart_servers,
                 stop_server_after_job=stop_server_after_job,
+                emon_enable=emon_enable,
             )
         )
 
@@ -1391,15 +1461,30 @@ def main() -> int:
                         f"Warmup failed for job={job.name} (exit_code={rc_w}). See {warmup_log_path}"
                     )
 
-            exit_code, combined_output, wall_time_sec = _run_job_streaming(
-                cmd=cmd,
-                cwd=REPO_ROOT,
-                env=env,
-                log_path=log_path,
-                tee=args.tee,
-                prefix=f"[{job.name}] ",
-                timeout_sec=job.timeout_sec,
-            )
+            emon_session: Optional[EmonSession] = None
+            emon_output_path: Optional[Path] = None
+            if bool(job.emon_enable):
+                emon_dir = run_dir / f"{run_id}_{idx:03d}_{safe}.emon"
+                emon_output_path = emon_dir / "emon.dat"
+                emon_session = _start_emon_session(
+                    output_path=emon_output_path,
+                    tee=bool(args.tee),
+                    prefix=f"[{job.name}] ",
+                )
+
+            try:
+                exit_code, combined_output, wall_time_sec = _run_job_streaming(
+                    cmd=cmd,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    log_path=log_path,
+                    tee=args.tee,
+                    prefix=f"[{job.name}] ",
+                    timeout_sec=job.timeout_sec,
+                )
+            finally:
+                if emon_session is not None:
+                    _stop_emon_session(emon_session, tee=bool(args.tee), prefix=f"[{job.name}] ")
 
             ended = dt.datetime.now(tz=dt.timezone.utc)
             ended_s = ended.isoformat()
@@ -1417,6 +1502,10 @@ def main() -> int:
                 "env": {k: job.env.get(k) for k in sorted(job.env.keys())},
                 "log_path": str(log_path),
                 "server": server_info,
+                "emon": {
+                    "enabled": bool(job.emon_enable),
+                    "output_path": str(emon_output_path) if emon_output_path is not None else "",
+                },
             }
 
             model = job.env.get("MODEL") or ""

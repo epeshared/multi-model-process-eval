@@ -68,6 +68,7 @@
       "script": "run_embedding_yahoo",
       "args": [],
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "MODEL": "qwen3-embedding-4b",
         "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",
@@ -90,6 +91,7 @@
       "script": "run_embedding_yahoo",
       "args": [],
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "MODEL": "qwen3-embedding-4b",
         "MODEL_DIR": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",

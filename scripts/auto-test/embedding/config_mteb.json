@@ -69,6 +69,7 @@
         "task": "STSBenchmark"
       },
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "BACKEND": "vllm-http",
         "BASE_URL": "http://127.0.0.1:9090",
@@ -91,6 +92,7 @@
         "task": "STSBenchmark"
       },
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "BACKEND": "vllm-http",
         "BASE_URL": "http://127.0.0.1:9090",
@@ -113,6 +115,7 @@
         "task": "STSBenchmark"
       },
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "BACKEND": "sglang",
         "HOST": "0.0.0.0",
@@ -136,6 +139,7 @@
         "task": "STSBenchmark"
       },
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "BACKEND": "sglang",
         "HOST": "0.0.0.0",
@@ -159,6 +163,7 @@
         "task": "STSBenchmark"
       },
       "warmup_runs": 2,
+      "emon_enable": false,
       "env": {
         "BACKEND": "vllm-http",
         "BASE_URL": "http://127.0.0.1:9090",
