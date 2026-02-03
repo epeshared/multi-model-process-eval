@@ -381,6 +381,7 @@ def _wait_server_ready(
     timeout_sec: float,
     interval_sec: float,
     probe_model_id: str = "",
+    proc: Optional[subprocess.Popen[str]] = None,
 ) -> bool:
     base_url = _norm_base_url(base_url)
     if not base_url:
@@ -389,6 +390,9 @@ def _wait_server_ready(
     eps = endpoints or ["POST /v1/embeddings", "/v1/models", "/health"]
     deadline = time.time() + max(1.0, float(timeout_sec))
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            # Server process has exited; don't wait out the full timeout.
+            return False
         for ep in eps:
             ep_s = str(ep or "").strip()
             if not ep_s:
@@ -420,6 +424,17 @@ def _wait_server_ready(
                     return True
         time.sleep(max(0.1, float(interval_sec)))
     return False
+
+
+def _tail_file(path: Path, *, max_lines: int = 80) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    lines = text.splitlines()
+    if len(lines) <= int(max_lines):
+        return text
+    return "\n".join(lines[-int(max_lines) :]) + "\n"
 
 
 def _parse_servers(cfg: Dict[str, Any]) -> Dict[str, ServerSpec]:
@@ -647,8 +662,27 @@ def _ensure_server(
         timeout_sec=spec.ready_timeout_sec,
         interval_sec=spec.ready_interval_sec,
         probe_model_id=probe_model_id,
+        proc=proc,
     )
     if not ok:
+        rc = proc.poll()
+        if rc is not None:
+            # Join tee thread briefly so logs are flushed before tailing.
+            if tee_thread is not None:
+                try:
+                    tee_thread.join(timeout=2.0)
+                except Exception:
+                    pass
+
+            tail = _tail_file(log_path, max_lines=120)
+            msg = (
+                f"Server exited before becoming ready: backend={spec.backend} base_url={base_url} exit_code={rc} "
+                f"(see {log_path})"
+            )
+            if tail.strip():
+                msg += "\n--- last log lines ---\n" + tail
+            raise SystemExit(msg)
+
         try:
             proc.terminate()
         except Exception:

@@ -29,8 +29,19 @@ WORK_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 echo "WORK_HOME=$WORK_HOME"
 
 # ===== 环境路径 =====
-export CONDA_PREFIX="/root/miniforge3/envs/xtang-embedding-cpu"
 export SGLANG_USE_CPU_ENGINE=1
+
+# Prefer a consistent env: if CONDA_PREFIX isn't set, infer it from the Python on PATH.
+if [[ -z "${CONDA_PREFIX:-}" ]]; then
+  CONDA_PREFIX="$(python -c 'import sys; from pathlib import Path; p=Path(sys.executable).resolve(); print(p.parents[1])' 2>/dev/null || true)"
+fi
+export CONDA_PREFIX
+echo "CONDA_PREFIX=${CONDA_PREFIX:-}"
+
+PYTHON_BIN="python"
+if [[ -n "${CONDA_PREFIX:-}" ]] && [[ -x "${CONDA_PREFIX}/bin/python" ]]; then
+  PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+fi
 
 # ===== 预装库（安全拼接 LD_PRELOAD）=====
 LIBS=(
@@ -55,7 +66,7 @@ HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-30000}
 
 # ===== 绑核与启动 =====
-python -m sglang.launch_server \
+"$PYTHON_BIN" -m sglang.launch_server \
   --model-path "$MODEL_DIR" \
   --tokenizer-path "$MODEL_DIR" \
   --trust-remote-code \
