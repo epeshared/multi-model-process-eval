@@ -22,7 +22,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "32-63,160-191",
+        "cores": "",
         "cpunodebind": "1",
         "membind": "1"
       },
@@ -73,7 +73,7 @@
       "env": {
         "MODEL": "qwen3-embedding-4b",
         "BACKEND": "sglang",
-        "NUMACTL_CORES":"",
+        "NUMACTL_CORES":"160-191",
         "NUMACTL_CPUNODEBIND": "",
         "NUMACTL_MEMBIND": "",
         "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-4B",
@@ -84,7 +84,7 @@
         "BASE_URL": "http://127.0.0.1:30001",
         "MODE": "token_len",
         "MAX_SAMPLES": "1000",
-        "BATCH_SIZE": "100",
+        "BATCH_SIZE": "200",
         "SYNTHETIC_TOKEN_LEN": "20",
         "DTYPE": "bfloat16"
       }

@@ -152,11 +152,53 @@ class RunningServer:
 
 
 def _effective_numactl_for_server(*, spec: ServerSpec, job_env: Dict[str, str]) -> Tuple[str, str, str]:
-    # Priority: per-job env overrides > servers.<backend>.numactl defaults.
-    numactl_cores = (job_env.get("NUMACTL_CORES") or "").strip() or (spec.numactl_cores or "").strip()
-    numactl_cpunodebind = (job_env.get("NUMACTL_CPUNODEBIND") or "").strip() or (spec.numactl_cpunodebind or "").strip()
-    numactl_membind = (job_env.get("NUMACTL_MEMBIND") or "").strip() or (spec.numactl_membind or "").strip()
+    # NOTE: Keep server NUMA binding independent from job NUMA binding.
+    #
+    # - Job-level NUMACTL_* is reserved for the benchmark/job process itself.
+    # - Server binding defaults come from servers.<backend>.numactl in the config.
+    # - If you need to override server binding per-job, use SERVER_NUMACTL_*.
+    numactl_cores = (job_env.get("SERVER_NUMACTL_CORES") or "").strip() or (spec.numactl_cores or "").strip()
+    numactl_cpunodebind = (job_env.get("SERVER_NUMACTL_CPUNODEBIND") or "").strip() or (spec.numactl_cpunodebind or "").strip()
+    numactl_membind = (job_env.get("SERVER_NUMACTL_MEMBIND") or "").strip() or (spec.numactl_membind or "").strip()
     return numactl_cores, numactl_cpunodebind, numactl_membind
+
+
+def _effective_numactl_for_job(*, job_env: Dict[str, str]) -> Tuple[str, str, str]:
+    """Return NUMA binding for the benchmark/job process.
+
+    Uses job-level NUMACTL_* env vars.
+    """
+
+    numactl_cores = (job_env.get("NUMACTL_CORES") or "").strip()
+    numactl_cpunodebind = (job_env.get("NUMACTL_CPUNODEBIND") or "").strip()
+    numactl_membind = (job_env.get("NUMACTL_MEMBIND") or "").strip()
+    return numactl_cores, numactl_cpunodebind, numactl_membind
+
+
+def _maybe_wrap_cmd_with_numactl(
+    *,
+    cmd: List[str],
+    numactl_cores: str,
+    numactl_cpunodebind: str,
+    numactl_membind: str,
+) -> List[str]:
+    """Wrap a command with numactl if any binding fields are provided."""
+
+    if not (numactl_cores or numactl_cpunodebind or numactl_membind):
+        return cmd
+    numactl_bin = shutil.which("numactl")
+    if not numactl_bin:
+        return cmd
+
+    prefix: List[str] = [numactl_bin]
+    if numactl_cores:
+        prefix += ["-C", numactl_cores]
+    if numactl_cpunodebind:
+        prefix += ["--cpunodebind", numactl_cpunodebind]
+    if numactl_membind:
+        prefix += ["--membind", numactl_membind]
+    prefix += ["--"]
+    return prefix + cmd
 
 
 def _parse_cpu_list_expr(expr: str) -> List[int]:
@@ -661,27 +703,19 @@ def _ensure_server(
     # Optional NUMA binding for server process.
     numactl_cores, numactl_cpunodebind, numactl_membind = eff_cores, eff_cpunodebind, eff_membind
 
-    # If caller provided an explicit CPU list but didn't specify which NUMA node to bind,
-    # infer a single node (only when unambiguous). This helps avoid libnuma(-1) crashes
-    # observed in some CPU-only SGLang/Torch distributed init paths.
-    if numactl_cores and (not numactl_cpunodebind) and (not numactl_membind):
-        inferred = _infer_single_numa_node_from_cores(numactl_cores)
-        if inferred is not None:
-            numactl_cpunodebind = str(inferred)
-            numactl_membind = str(inferred)
-            if tee:
-                print(f"[server:{spec.backend}] inferred NUMA bind: node={inferred} from cores={numactl_cores}")
+    # IMPORTANT: do not implicitly infer --cpunodebind/--membind.
+    # If the user leaves them empty, we start without them.
 
     if numactl_cores or numactl_cpunodebind or numactl_membind:
         numactl_bin = shutil.which("numactl")
         if not numactl_bin:
             warn_bits = []
             if numactl_cores:
-                warn_bits.append(f"NUMACTL_CORES={numactl_cores}")
+                warn_bits.append(f"SERVER_NUMACTL_CORES={numactl_cores}")
             if numactl_cpunodebind:
-                warn_bits.append(f"NUMACTL_CPUNODEBIND={numactl_cpunodebind}")
+                warn_bits.append(f"SERVER_NUMACTL_CPUNODEBIND={numactl_cpunodebind}")
             if numactl_membind:
-                warn_bits.append(f"NUMACTL_MEMBIND={numactl_membind}")
+                warn_bits.append(f"SERVER_NUMACTL_MEMBIND={numactl_membind}")
             print(f"[warn] numactl requested ({', '.join(warn_bits)}) but numactl not found; starting without binding")
         else:
             prefix: List[str] = [numactl_bin]
@@ -1383,9 +1417,9 @@ def main() -> int:
             token_len = _infer_token_len(script=script, env=env if isinstance(env, dict) else {})
 
             # Prefer the effective server numactl recorded at runtime; else recompute from env + config defaults.
-            numactl_cores = server_info.get("numactl_cores") or env.get("NUMACTL_CORES")
-            numactl_cpunodebind = server_info.get("numactl_cpunodebind") or env.get("NUMACTL_CPUNODEBIND")
-            numactl_membind = server_info.get("numactl_membind") or env.get("NUMACTL_MEMBIND")
+            numactl_cores = server_info.get("numactl_cores")
+            numactl_cpunodebind = server_info.get("numactl_cpunodebind")
+            numactl_membind = server_info.get("numactl_membind")
 
             if (not (numactl_cores or numactl_cpunodebind or numactl_membind)) and backend in servers:
                 # Only fill from server defaults if this script/backend likely uses a server.
@@ -1521,6 +1555,15 @@ def main() -> int:
             env = os.environ.copy()
             env.update(job.env)
 
+            # Optional NUMA binding for the benchmark/job process.
+            job_numactl_cores, job_numactl_cpunodebind, job_numactl_membind = _effective_numactl_for_job(job_env=job.env)
+            cmd_job = _maybe_wrap_cmd_with_numactl(
+                cmd=cmd,
+                numactl_cores=job_numactl_cores,
+                numactl_cpunodebind=job_numactl_cpunodebind,
+                numactl_membind=job_numactl_membind,
+            )
+
             backend_raw = job.env.get("BACKEND") or ""
             backend = _norm_backend(backend_raw)
             base_url = _norm_base_url(job.env.get("BASE_URL") or "")
@@ -1555,16 +1598,16 @@ def main() -> int:
 
             if args.dry_run:
                 if server_info:
-                    print(f"[dry-run] {job.name}: (server ready) {' '.join(cmd)}")
+                    print(f"[dry-run] {job.name}: (server ready) {' '.join(cmd_job)}")
                 else:
-                    print(f"[dry-run] {job.name}: {' '.join(cmd)}")
+                    print(f"[dry-run] {job.name}: {' '.join(cmd_job)}")
                 continue
 
             # Warmup runs: same command, but do NOT parse metrics or append to summary.
             for w in range(int(job.warmup_runs or 0)):
                 warmup_log_path = run_dir / f"{run_id}_{idx:03d}_{safe}.warmup_{w+1:02d}.log"
                 rc_w, _, _ = _run_job_streaming(
-                    cmd=cmd,
+                    cmd=cmd_job,
                     cwd=REPO_ROOT,
                     env=env,
                     log_path=warmup_log_path,
@@ -1590,7 +1633,7 @@ def main() -> int:
 
             try:
                 exit_code, combined_output, wall_time_sec = _run_job_streaming(
-                    cmd=cmd,
+                    cmd=cmd_job,
                     cwd=REPO_ROOT,
                     env=env,
                     log_path=log_path,
@@ -1610,7 +1653,7 @@ def main() -> int:
                 "job_name": job.name,
                 "script": job.script,
                 "script_path": str(script_path),
-                "cmd": cmd,
+                "cmd": cmd_job,
                 "exit_code": exit_code,
                 "started_at_utc": started_s,
                 "ended_at_utc": ended_s,
@@ -1618,6 +1661,11 @@ def main() -> int:
                 "env": {k: job.env.get(k) for k in sorted(job.env.keys())},
                 "log_path": str(log_path),
                 "server": server_info,
+                "job_numactl": {
+                    "cores": job_numactl_cores,
+                    "cpunodebind": job_numactl_cpunodebind,
+                    "membind": job_numactl_membind,
+                },
                 "emon": {
                     "enabled": bool(job.emon_enable),
                     "output_path": str(emon_output_path) if emon_output_path is not None else "",
@@ -1661,9 +1709,10 @@ def main() -> int:
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,
-                    "numactl_cores": (server_info.get("numactl_cores") or job.env.get("NUMACTL_CORES")),
-                    "numactl_cpunodebind": (server_info.get("numactl_cpunodebind") or job.env.get("NUMACTL_CPUNODEBIND")),
-                    "numactl_membind": (server_info.get("numactl_membind") or job.env.get("NUMACTL_MEMBIND")),
+                    # Keep these columns representing *server* binding.
+                    "numactl_cores": server_info.get("numactl_cores"),
+                    "numactl_cpunodebind": server_info.get("numactl_cpunodebind"),
+                    "numactl_membind": server_info.get("numactl_membind"),
                     "token_len": _infer_token_len(script=job.script, env=job.env),
                     "tps": merged.get("tps"),
                     "latency_sec": merged.get("latency_sec"),
