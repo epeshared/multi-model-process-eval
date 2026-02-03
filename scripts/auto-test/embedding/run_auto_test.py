@@ -159,6 +159,76 @@ def _effective_numactl_for_server(*, spec: ServerSpec, job_env: Dict[str, str]) 
     return numactl_cores, numactl_cpunodebind, numactl_membind
 
 
+def _parse_cpu_list_expr(expr: str) -> List[int]:
+    """Parse a linux CPU list expression like '0-15,32,40-47' into a sorted list."""
+
+    s = (expr or "").strip()
+    if not s:
+        return []
+    out: List[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                lo = int(a.strip())
+                hi = int(b.strip())
+            except Exception:
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            # Guard against absurd ranges.
+            span = min(hi - lo, 100000)
+            for x in range(lo, lo + span + 1):
+                out.append(x)
+        else:
+            try:
+                out.append(int(part))
+            except Exception:
+                continue
+    # Dedupe
+    return sorted(set(out))
+
+
+def _cpu_to_numa_node(cpu_id: int) -> Optional[int]:
+    """Best-effort map CPU id -> NUMA node id using sysfs."""
+
+    cpu_dir = Path(f"/sys/devices/system/cpu/cpu{int(cpu_id)}")
+    if not cpu_dir.exists():
+        return None
+    try:
+        for child in cpu_dir.iterdir():
+            name = child.name
+            if name.startswith("node") and name[4:].isdigit():
+                return int(name[4:])
+    except Exception:
+        return None
+    return None
+
+
+def _infer_single_numa_node_from_cores(cores_expr: str) -> Optional[int]:
+    """Infer a single NUMA node id if all requested cores map to the same node."""
+
+    cpus = _parse_cpu_list_expr(cores_expr)
+    if not cpus:
+        return None
+
+    nodes: List[int] = []
+    for cpu in cpus[:256]:
+        n = _cpu_to_numa_node(cpu)
+        if n is None:
+            # If sysfs can't map a cpu, don't guess.
+            return None
+        nodes.append(n)
+
+    uniq = sorted(set(nodes))
+    if len(uniq) == 1:
+        return uniq[0]
+    return None
+
+
 def _teardown_server(rs: RunningServer) -> None:
     if not rs.started_by_runner:
         return
@@ -590,6 +660,17 @@ def _ensure_server(
 
     # Optional NUMA binding for server process.
     numactl_cores, numactl_cpunodebind, numactl_membind = eff_cores, eff_cpunodebind, eff_membind
+
+    # If caller provided an explicit CPU list but didn't specify which NUMA node to bind,
+    # infer a single node (only when unambiguous). This helps avoid libnuma(-1) crashes
+    # observed in some CPU-only SGLang/Torch distributed init paths.
+    if numactl_cores and (not numactl_cpunodebind) and (not numactl_membind):
+        inferred = _infer_single_numa_node_from_cores(numactl_cores)
+        if inferred is not None:
+            numactl_cpunodebind = str(inferred)
+            numactl_membind = str(inferred)
+            if tee:
+                print(f"[server:{spec.backend}] inferred NUMA bind: node={inferred} from cores={numactl_cores}")
 
     if numactl_cores or numactl_cpunodebind or numactl_membind:
         numactl_bin = shutil.which("numactl")
