@@ -22,9 +22,9 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "32-63",
-        "cpunodebind": "",
-        "membind": ""
+        "cores": "32-63,160-191",
+        "cpunodebind": "1",
+        "membind": "1"
       },
       "env_from_job": {
         "MODEL_DIR": "MODEL_DIR",

@@ -711,6 +711,7 @@ def _ensure_server(
 
     if tee:
         print(f"[server:{spec.backend}] starting (log: {log_path})")
+        print(f"[server:{spec.backend}] cmd: {' '.join(cmd)}")
 
     proc = subprocess.Popen(
         cmd,
