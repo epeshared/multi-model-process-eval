@@ -271,6 +271,50 @@ def _infer_single_numa_node_from_cores(cores_expr: str) -> Optional[int]:
     return None
 
 
+def _read_numa_node_cpulist(numa_node: int) -> Optional[str]:
+    """Read /sys NUMA node cpulist (e.g. '0-95,192-287')."""
+
+    try:
+        p = Path(f"/sys/devices/system/node/node{int(numa_node)}/cpulist")
+        s = p.read_text(encoding="utf-8").strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _infer_sglang_cpu_omp_threads_bind(
+    *,
+    numactl_cores: str,
+    numactl_cpunodebind: str,
+    numactl_membind: str,
+) -> Optional[str]:
+    """Infer a safe SGLANG_CPU_OMP_THREADS_BIND value.
+
+    For sglang CPU+AMX, `torch.ops.sgl_kernel.init_cpu_threads_env()` will pin
+    OpenMP threads to `local_omp_cpuid`. If we externally bind the server with
+    numactl (e.g. to node1), leaving SGLANG_CPU_OMP_THREADS_BIND unset makes
+    sglang default to NUMA node0 for tp_rank=0, which can crash when the process
+    is not allowed to run on those CPUs.
+
+    We align thread binding with the runner's server numactl binding.
+    """
+
+    cores = (numactl_cores or "").strip()
+    if cores:
+        return cores
+
+    node: Optional[int] = None
+    if (numactl_cpunodebind or "").strip().isdigit():
+        node = int(numactl_cpunodebind)
+    elif (numactl_membind or "").strip().isdigit():
+        node = int(numactl_membind)
+
+    if node is None or node < 0:
+        return None
+
+    return _read_numa_node_cpulist(node)
+
+
 def _teardown_server(rs: RunningServer) -> None:
     if not rs.started_by_runner:
         return
@@ -695,6 +739,36 @@ def _ensure_server(
     for env_key, job_key in spec.env_from_job.items():
         if job_key in job.env:
             env[env_key] = str(job.env[job_key])
+
+    # For sglang CPU+AMX: align sglang's OpenMP thread binding with our server
+    # NUMA binding to avoid pinning to disallowed CPUs (which can segfault in
+    # sgl_kernel.init_cpu_threads_env).
+    if spec.backend == "sglang" and "SGLANG_CPU_OMP_THREADS_BIND" not in env:
+        inferred_bind = _infer_sglang_cpu_omp_threads_bind(
+            numactl_cores=eff_cores,
+            numactl_cpunodebind=eff_cpunodebind,
+            numactl_membind=eff_membind,
+        )
+        if inferred_bind:
+            env["SGLANG_CPU_OMP_THREADS_BIND"] = inferred_bind
+
+    # sglang can be passed a NUMA node hint via SGLANG_NUMA_NODE. However, doing
+    # this implicitly can change how sglang wraps its subprocesses (it may add
+    # internal numactl wrappers). Keep this opt-in.
+    if spec.backend == "sglang" and "SGLANG_NUMA_NODE" not in env:
+        if _parse_bool(os.environ.get("AUTO_SGLANG_NUMA_NODE"), default=False):
+            inferred_node: Optional[int] = None
+
+            # Prefer explicit node binding if provided.
+            if eff_cpunodebind.isdigit():
+                inferred_node = int(eff_cpunodebind)
+            elif eff_membind.isdigit():
+                inferred_node = int(eff_membind)
+            else:
+                inferred_node = _infer_single_numa_node_from_cores(eff_cores)
+
+            if inferred_node is not None and inferred_node >= 0:
+                env["SGLANG_NUMA_NODE"] = str(inferred_node)
 
     log_path = result_dir / f"{run_id}_{idx:03d}_server_{_sanitize_filename(spec.backend)}.log"
 

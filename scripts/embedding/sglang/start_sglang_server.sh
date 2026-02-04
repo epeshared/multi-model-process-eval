@@ -58,12 +58,24 @@ export LD_PRELOAD="${PRELOAD_JOIN}${LD_PRELOAD:+:$LD_PRELOAD}"
 # ===== 线程/NUMA（按需调整）=====
 export MALLOC_ARENA_MAX=1
 
+# Optional: if you suspect PyTorch/libnuma issues, you can disable PyTorch's
+# internal NUMA logic by exporting `C10_DISABLE_NUMA=1` before launch.
+
 # ===== Batch Size =====
 BATCH_SIZE=${BATCH_SIZE:-16}
 echo "Batch size = $BATCH_SIZE"
 
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-30000}
+
+# Optional: pass an explicit NUMA node hint to sglang.
+# This is useful when the process is started under numactl and sglang/torch
+# would otherwise try to initialize with an invalid node (e.g. -1).
+SGLANG_NUMA_NODE=${SGLANG_NUMA_NODE:-}
+NUMA_ARGS=()
+if [[ -n "${SGLANG_NUMA_NODE}" ]]; then
+  NUMA_ARGS=(--numa-node "${SGLANG_NUMA_NODE}")
+fi
 
 # ===== 绑核与启动 =====
 "$PYTHON_BIN" -m sglang.launch_server \
@@ -76,6 +88,7 @@ PORT=${PORT:-30000}
   --device cpu \
   --host "$HOST" --port "$PORT" \
   --skip-server-warmup \
+  "${NUMA_ARGS[@]}" \
   --tp 1 \
   --dtype bfloat16 \
   --enable-torch-compile \
