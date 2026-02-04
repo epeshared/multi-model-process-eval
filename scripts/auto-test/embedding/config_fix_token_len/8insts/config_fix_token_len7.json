@@ -22,13 +22,13 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "0-31",
+        "cores": "96-111",
         "cpunodebind": "",
         "membind": ""
       },
       "env_from_job": {
         "MODEL_DIR": "MODEL_DIR",
-        "BATCH_SIZE": "SERVER_BATCH_SIZE",
+        "BATCH_SIZE": "BATCH_SIZE",
         "HOST": "HOST",
         "PORT": "PORT"        
       },
@@ -45,7 +45,7 @@
       "args": [],
       "env": {},
       "numactl": {
-        "cores": "0-31",
+        "cores": "0-7",
         "cpunodebind": "",
         "membind": ""
       },
@@ -69,23 +69,23 @@
       "args": {
       },
       "warmup_runs": 2,
-      "emon_enable": true,
+      "emon_enable": false,
       "env": {
         "MODEL": "qwen3-embedding-4b",
         "BACKEND": "sglang",
-        "NUMACTL_CORES":"128-159",
+        "NUMACTL_CORES":"224-239",
         "NUMACTL_CPUNODEBIND": "",
         "NUMACTL_MEMBIND": "",
         "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-4B",
         "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
         "MODEL_ID": "Qwen3-Embedding-4B",
         "HOST": "0.0.0.0",
-        "PORT": "30000",
-        "BASE_URL": "http://127.0.0.1:30000",
+        "PORT": "30006",
+        "BASE_URL": "http://127.0.0.1:30006",
         "MODE": "token_len",
         "MAX_SAMPLES": "1000",
         "BATCH_SIZE": "200",
-        "SYNTHETIC_TOKEN_LEN": "50",
+        "SYNTHETIC_TOKEN_LEN": "20",
         "DTYPE": "bfloat16"
       }
     },

@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "description": "Auto-test for scripts/embedding/run_fix_token_len.sh (writes raw logs + parsed tps/latency into scripts/auto-test/embedding/result).",
+  "script_aliases": {
+    "run_fix_token_len": "scripts/embedding/run_fix_token_len.sh"
+  },
+  "defaults": {
+    "cwd": ".",
+    "result_dir": "scripts/auto-test/embedding/result/fix_token_len",
+    "timeout_sec": 21600,
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "servers": {
+    "sglang": {
+      "enabled": true,
+      "start_script": "scripts/embedding/sglang/start_sglang_server.sh",
+      "cwd": "scripts/embedding/sglang",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "48-63",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "BATCH_SIZE": "BATCH_SIZE",
+        "HOST": "HOST",
+        "PORT": "PORT"        
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1200,
+        "interval_sec": 2
+      }
+    },    
+    "vllm-http": {
+      "enabled": true,
+      "start_script": "scripts/embedding/vllm/start_vllm_server.sh",
+      "cwd": "scripts/embedding/vllm",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "0-7",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "SERVED_MODEL_NAME": "SERVED_MODEL_NAME",
+        "HOST": "HOST",
+        "PORT": "PORT"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    }
+  },
+  "jobs": [
+    {
+      "name": "fix_token_len_20_qwen3-embedding-4b_sglang-online",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "emon_enable": false,
+      "env": {
+        "MODEL": "qwen3-embedding-4b",
+        "BACKEND": "sglang",
+        "NUMACTL_CORES":"176-191",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-4B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
+        "MODEL_ID": "Qwen3-Embedding-4B",
+        "HOST": "0.0.0.0",
+        "PORT": "30003",
+        "BASE_URL": "http://127.0.0.1:30003",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "200",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    },
+    {
+      "name": "fix_token_len_20_qwen3-embedding-4b_vllm-http",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "emon_enable": false,
+      "env": {
+        "MODEL": "qwen3-embedding-4b",
+        "BACKEND": "vllm-http",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-4B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-4B",
+        "MODEL_ID": "Qwen3-Embedding-4B",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    },
+    {
+      "name": "fix_token_len_20_qwen3-embedding-0.6b_sglang-online",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "emon_enable": false,
+      "env": {
+        "MODEL": "qwen3-embedding-0.6b",
+        "BACKEND": "sglang",
+        "NUMACTL_CORES":"",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "HOST": "0.0.0.0",
+        "PORT": "30000",
+        "BASE_URL": "http://127.0.0.1:30000",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    },
+    {
+      "name": "fix_token_len_20_qwen3-embedding-0.6b_vllm-http",
+      "script": "run_fix_token_len",
+      "args": {
+      },
+      "warmup_runs": 2,
+      "emon_enable": false,
+      "env": {
+        "MODEL": "qwen3-embedding-0.6b",
+        "BACKEND": "vllm-http",
+        "NUMACTL_CORES": "",
+        "NUMACTL_CPUNODEBIND": "",
+        "NUMACTL_MEMBIND": "",
+        "MODEL_DIR": "/home/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+        "SERVED_MODEL_NAME": "Qwen3-Embedding-0.6B",
+        "MODEL_ID": "Qwen3-Embedding-0.6B",
+        "HOST": "0.0.0.0",
+        "PORT": "9090",
+        "BASE_URL": "http://127.0.0.1:9090",
+        "MODE": "token_len",
+        "MAX_SAMPLES": "1000",
+        "BATCH_SIZE": "100",
+        "SYNTHETIC_TOKEN_LEN": "20",
+        "DTYPE": "bfloat16"
+      }
+    }        
+  ]
+}

@@ -197,6 +197,22 @@ def _maybe_wrap_cmd_with_numactl(
         prefix += ["--cpunodebind", numactl_cpunodebind]
     if numactl_membind:
         prefix += ["--membind", numactl_membind]
+    else:
+        # IMPORTANT:
+        # If the parent process is started under a restrictive memory policy
+        # (e.g. `numactl -m 2`), that policy is inherited by child processes.
+        # When we apply CPU affinity via numactl without a memory policy, the
+        # inherited membind can cause OOM-killer events even though the machine
+        # has plenty of RAM.
+        #
+        # Default to an explicit, non-restrictive policy that matches the CPU
+        # binding. Users can opt out by setting:
+        #   AUTO_TEST_NUMACTL_DEFAULT_MEMPOLICY=inherit
+        default_policy = (os.environ.get("AUTO_TEST_NUMACTL_DEFAULT_MEMPOLICY") or "localalloc").strip().lower()
+        if default_policy in {"localalloc", "local"}:
+            prefix += ["--localalloc"]
+        elif default_policy in {"interleave", "interleave=all", "all"}:
+            prefix += ["--interleave=all"]
     prefix += ["--"]
     return prefix + cmd
 
@@ -799,6 +815,12 @@ def _ensure_server(
                 prefix += ["--cpunodebind", numactl_cpunodebind]
             if numactl_membind:
                 prefix += ["--membind", numactl_membind]
+            else:
+                default_policy = (os.environ.get("AUTO_TEST_NUMACTL_DEFAULT_MEMPOLICY") or "localalloc").strip().lower()
+                if default_policy in {"localalloc", "local"}:
+                    prefix += ["--localalloc"]
+                elif default_policy in {"interleave", "interleave=all", "all"}:
+                    prefix += ["--interleave=all"]
             prefix += ["--"]
             cmd = prefix + cmd
 
