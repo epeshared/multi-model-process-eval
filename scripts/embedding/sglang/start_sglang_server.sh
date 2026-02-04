@@ -31,23 +31,30 @@ echo "WORK_HOME=$WORK_HOME"
 # ===== 环境路径 =====
 export SGLANG_USE_CPU_ENGINE=1
 
-# Prefer a consistent env: if CONDA_PREFIX isn't set, infer it from the Python on PATH.
-if [[ -z "${CONDA_PREFIX:-}" ]]; then
-  CONDA_PREFIX="$(python -c 'import sys; from pathlib import Path; p=Path(sys.executable).resolve(); print(p.parents[1])' 2>/dev/null || true)"
+# Use the active Python environment.
+# - If you want to force a specific interpreter, set SGLANG_PYTHON.
+# - Avoid relying on CONDA_PREFIX here (it can point to conda *base*).
+PYTHON_BIN="${SGLANG_PYTHON:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python || true)"
 fi
-export CONDA_PREFIX
-echo "CONDA_PREFIX=${CONDA_PREFIX:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "ERROR: python not found on PATH" >&2
+  exit 127
+fi
+echo "PYTHON_BIN=${PYTHON_BIN}"
 
-PYTHON_BIN="python"
-if [[ -n "${CONDA_PREFIX:-}" ]] && [[ -x "${CONDA_PREFIX}/bin/python" ]]; then
-  PYTHON_BIN="${CONDA_PREFIX}/bin/python"
-fi
+PY_PREFIX="$("${PYTHON_BIN}" -c 'import sys; from pathlib import Path; p=Path(sys.executable).resolve(); print(p.parents[1])' 2>/dev/null || true)"
+echo "PY_PREFIX=${PY_PREFIX}"
 
 # ===== 预装库（安全拼接 LD_PRELOAD）=====
 LIBS=(
-  "$CONDA_PREFIX/lib/libiomp5.so"
-  "$CONDA_PREFIX/lib/libtcmalloc.so"
-  "$CONDA_PREFIX/lib/libtbbmalloc.so.2"
+  "${PY_PREFIX}/lib/libiomp5.so"
+  "${PY_PREFIX}/lib/libtcmalloc.so"
+  "${PY_PREFIX}/lib/libtbbmalloc.so.2"
 )
 PRELOAD_JOIN=""
 for f in "${LIBS[@]}"; do
@@ -61,12 +68,42 @@ export MALLOC_ARENA_MAX=1
 # Optional: if you suspect PyTorch/libnuma issues, you can disable PyTorch's
 # internal NUMA logic by exporting `C10_DISABLE_NUMA=1` before launch.
 
-# ===== Batch Size =====
-BATCH_SIZE=${BATCH_SIZE:-16}
+# ===== Batch Size (controls --torch-compile-max-bs) =====
+# Prefer BATCH_SIZE; allow legacy SERVER_BATCH_SIZE as a fallback.
+BATCH_SIZE=${BATCH_SIZE:-${SERVER_BATCH_SIZE:-16}}
 echo "Batch size = $BATCH_SIZE"
 
 HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-30000}
+
+# ===== Memory / cache caps (highly recommended for multi-instance runs) =====
+# If unset, sglang sizes KV cache based on perceived available memory, which
+# can massively over-allocate when multiple servers start in parallel.
+#
+# NOTE: This repo previously used SGLANG_MAX_TOTAL_NUM_TOKENS / SGLANG_CONTEXT_LEN.
+# The installed SGLang version expects:
+#   --max-total-tokens
+#   --context-length
+SGLANG_MAX_TOTAL_TOKENS=${SGLANG_MAX_TOTAL_TOKENS:-${SGLANG_MAX_TOTAL_NUM_TOKENS:-}}
+SGLANG_CONTEXT_LENGTH=${SGLANG_CONTEXT_LENGTH:-${SGLANG_CONTEXT_LEN:-}}
+SGLANG_MEM_FRACTION_STATIC=${SGLANG_MEM_FRACTION_STATIC:-}
+
+EXTRA_ARGS=()
+if [[ -n "${SGLANG_MAX_TOTAL_TOKENS}" ]]; then
+  EXTRA_ARGS+=(--max-total-tokens "${SGLANG_MAX_TOTAL_TOKENS}")
+fi
+if [[ -n "${SGLANG_CONTEXT_LENGTH}" ]]; then
+  EXTRA_ARGS+=(--context-length "${SGLANG_CONTEXT_LENGTH}")
+fi
+if [[ -n "${SGLANG_MEM_FRACTION_STATIC}" ]]; then
+  EXTRA_ARGS+=(--mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC}")
+fi
+
+# Embedding workloads don't require multimodal. Keep it opt-in.
+SGLANG_ENABLE_MULTIMODAL=${SGLANG_ENABLE_MULTIMODAL:-0}
+if [[ "${SGLANG_ENABLE_MULTIMODAL}" == "1" ]]; then
+  EXTRA_ARGS+=(--enable-multimodal)
+fi
 
 # Optional: pass an explicit NUMA node hint to sglang.
 # This is useful when the process is started under numactl and sglang/torch
@@ -84,11 +121,11 @@ fi
   --trust-remote-code \
   --disable-overlap-schedule \
   --is-embedding \
-  --enable-multimodal \
   --device cpu \
   --host "$HOST" --port "$PORT" \
   --skip-server-warmup \
   "${NUMA_ARGS[@]}" \
+  "${EXTRA_ARGS[@]}" \
   --tp 1 \
   --dtype bfloat16 \
   --enable-torch-compile \
