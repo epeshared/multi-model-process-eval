@@ -178,23 +178,38 @@ if [[ "${BACKEND}" == "sglang-offline" || "${BACKEND}" == "sglang_offline" ]]; t
   fi
 
   # Safe LD_PRELOAD join (only add libs that exist; don't clobber existing preload).
-  _existing_preload="${LD_PRELOAD:-}"
-  _preload_join=""
-  _libs=(
-    "${CONDA_PREFIX}/lib/libiomp5.so"
-    "${CONDA_PREFIX}/lib/libtcmalloc.so"
-    "${CONDA_PREFIX}/lib/libtbbmalloc.so.2"
-  )
-  for f in "${_libs[@]}"; do
-    [[ -f "${f}" ]] && _preload_join="${_preload_join:+${_preload_join}:}${f}"
-  done
-  if [[ -n "${_preload_join}" ]]; then
-    if [[ -n "${_existing_preload}" ]]; then
-      export LD_PRELOAD="${_preload_join}:${_existing_preload}"
-    else
-      export LD_PRELOAD="${_preload_join}"
-    fi
+  export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+  export LD_PRELOAD=${LD_LIBRARY_PATH}/libtcmalloc.so.4:${LD_LIBRARY_PATH}/libtbbmalloc.so.2
+
+  # Optional: keep iomp preload if present in the active Python prefix.
+  PYTHON_BIN="${SGLANG_PYTHON:-}"
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    PYTHON_BIN="$(command -v python || true)"
   fi
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    PYTHON_BIN="$(command -v python3 || true)"
+  fi
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "ERROR: python not found on PATH" >&2
+    exit 127
+  fi
+  echo "PYTHON_BIN=${PYTHON_BIN}"
+
+  PY_PREFIX="$(${PYTHON_BIN} -c 'import sys; from pathlib import Path; p=Path(sys.executable).resolve(); print(p.parents[1])' 2>/dev/null || true)"
+  echo "PY_PREFIX=${PY_PREFIX}"
+
+  if [[ -n "${PY_PREFIX}" ]] && [[ -f "${PY_PREFIX}/lib/libiomp5.so" ]]; then
+    export LD_PRELOAD="${LD_PRELOAD}:${PY_PREFIX}/lib/libiomp5.so"
+  elif [[ -f "${CONDA_PREFIX}/lib/libiomp5.so" ]]; then
+    # Fallback: allow explicit CONDA_PREFIX override.
+    export LD_PRELOAD="${LD_PRELOAD}:${CONDA_PREFIX}/lib/libiomp5.so"
+  fi
+
+  for f in "${LD_LIBRARY_PATH}/libtcmalloc.so.4" "${LD_LIBRARY_PATH}/libtbbmalloc.so.2"; do
+    if [[ ! -f "${f}" ]]; then
+      echo "[run_qwen_vl_synthetic] WARN: preload library not found: ${f}" >&2
+    fi
+  done
 fi
 
 # If user already passed --warmup via EXTRA_ARGS, don't add another one.

@@ -15,6 +15,51 @@ MODEL_DIR=${MODEL_DIR:-"/home/xtang//models/Qwen/Qwen3-Embedding-4B"}
 echo "Using model: $MODEL_DIR"
 
 
+# Use the active Python environment.
+# - If you want to force a specific interpreter, set SGLANG_PYTHON.
+PYTHON_BIN="${SGLANG_PYTHON:-}"
+if [[ -z "${PYTHON_BIN}" ]]; then
+   PYTHON_BIN="$(command -v python || true)"
+fi
+if [[ -z "${PYTHON_BIN}" ]]; then
+   PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [[ -z "${PYTHON_BIN}" ]]; then
+   echo "ERROR: python not found on PATH" >&2
+   exit 127
+fi
+echo "PYTHON_BIN=${PYTHON_BIN}"
+
+PY_PREFIX="$(${PYTHON_BIN} -c 'import sys; from pathlib import Path; p=Path(sys.executable).resolve(); print(p.parents[1])' 2>/dev/null || true)"
+echo "PY_PREFIX=${PY_PREFIX}"
+
+# ===== 预装库（required; exit if not loadable）=====
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+
+LIB_TCMALLOC="${LD_LIBRARY_PATH}/libtcmalloc.so.4"
+LIB_TBBMALLOC="${LD_LIBRARY_PATH}/libtbbmalloc.so.2"
+LIB_IOMP="${PY_PREFIX}/lib/libiomp5.so"
+
+for f in "${LIB_TCMALLOC}" "${LIB_TBBMALLOC}" "${LIB_IOMP}"; do
+   if [[ ! -f "${f}" ]]; then
+      echo "[start_sglang_server_cuda] ERROR: required library not found: ${f}" >&2
+      exit 1
+   fi
+done
+
+export LD_PRELOAD="${LIB_TCMALLOC}:${LIB_TBBMALLOC}:${LIB_IOMP}${LD_PRELOAD:+:${LD_PRELOAD}}"
+
+_preload_err="$(LD_LIBRARY_PATH="${LD_LIBRARY_PATH}" LD_PRELOAD="${LD_PRELOAD}" /usr/bin/true 2>&1)" || {
+   echo "[start_sglang_server_cuda] ERROR: LD_PRELOAD test failed" >&2
+   echo "${_preload_err}" >&2
+   exit 1
+}
+if [[ -n "${_preload_err}" ]]; then
+   echo "[start_sglang_server_cuda] ERROR: LD_PRELOAD produced loader output" >&2
+   echo "${_preload_err}" >&2
+   exit 1
+fi
+
 
 # ===== Batch Size =====
 BATCH_SIZE=${BATCH_SIZE:-16}
@@ -25,7 +70,7 @@ PORT=${PORT:-30000}
 
 # ===== 绑核与启动 =====
 # numactl -C 0-15 \
-python -m sglang.launch_server \
+"$PYTHON_BIN" -m sglang.launch_server \
    --model-path "$MODEL_DIR" \
    --tokenizer-path "$MODEL_DIR" \
    --trust-remote-code \
