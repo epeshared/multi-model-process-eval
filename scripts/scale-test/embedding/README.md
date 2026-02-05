@@ -30,6 +30,11 @@ Each run creates a folder like:
 
 - `scripts/scale-test/embedding/result/fix_token_len/<scale_id>/`
 
+If you sweep multiple CPU sets and/or multiple KV limits, the runner creates per-variant subfolders:
+
+- `.../<scale_id>/cpu_<cpus>__kv_<max_total_tokens>/`
+- `.../<scale_id>/variants.json` (manifest)
+
 Inside it you’ll find:
 
 - `auto_test_config.generated.json`: the generated auto-test config fed into `run_auto_test.py`
@@ -37,6 +42,19 @@ Inside it you’ll find:
 - `summary_<run_id>.csv`: per-job TPS/latency/etc (written by `run_auto_test.py`)
 - `<run_id>/...`: per-job logs + `*.metrics.json` (+ `*.emon/emon.dat` when enabled)
 - `aggregate.csv`: merged perf + emon paths (and emon key-values if parsable)
+
+The top-level `aggregate.csv` includes a `variant` column to distinguish combinations.
+
+## Sweeping CPU sets / KV cache limit
+
+You can sweep additional dimensions directly under `run`:
+
+- `run.cpu.cpus`: either a single string (e.g. `"0-7"`) or a list (e.g. `["0-7", "8-15"]`)
+- `run.sglang_max_total_tokens`: either a single value or a list (e.g. `["120000", "250000"]`)
+
+When provided as lists, the runner executes the cartesian product:
+
+`cpu.cpus × sglang_max_total_tokens × batch_sizes × token_lens × repeats`
 
 ## Notes on CPU/memory limiting
 
@@ -46,6 +64,16 @@ The runner tries to constrain the entire auto-test process tree (runner + server
 2) Fallback to `taskset -c` (CPU affinity) + `prlimit --as=` (virtual memory cap).
 
 If neither method is available, it runs without enforcement and prints a warning.
+
+## Continue after OOM/failures
+
+By default, the scale-test runner stops immediately when the underlying auto-test runner returns a non-zero exit code (e.g. OOM kill / exit code 137).
+
+If you want to **continue running later variants** (e.g. other CPU sets / other `SGLANG_MAX_TOTAL_TOKENS` values) even after a failure, set:
+
+- `run.continue_on_error: true`
+
+When enabled, the runner will keep going and will also write a marker row into `aggregate.csv` for failed variants (so you can see which combination failed).
 
 ## Notes on SGLang caching (important for apples-to-apples TPS)
 
