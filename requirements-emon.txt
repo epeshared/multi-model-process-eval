@@ -1,0 +1,9 @@
+# Python deps needed for Intel EMON pyedp post-processing (emon -process-pyedp)
+# Install into the same Python environment that is used to run the scale/auto runners.
+
+pytz
+defusedxml
+natsort
+polars
+openpyxl
+xlsxwriter

@@ -1,22 +1,15 @@
 {
   "version": 1,
-  "description": "Scale-test: sweep SYNTHETIC_TOKEN_LEN for run_fix_token_len under CPU/memory limits, with optional EMON capture + pyedp processing.",
+  "description": "Repro auto-test ~195 TPS: no MemoryMax, no SGLANG cache caps, warm cache enabled. Server pinned to 0-15, job pinned to 16-31.",
 
   "template_auto_test_config": "scripts/auto-test/embedding/config_fix_token_len.json",
   "result_root": "scripts/scale-test/embedding/result/fix_token_len",
 
   "run": {
     "token_lens": [20],
-    "batch_sizes": [100],    
+    "batch_sizes": [200],
     "repeats": 1,
-    "warmup_runs": 2,
-
-    "cpu": {
-      "cpus": "0-31"
-    },
-    "memory": {
-      "max_gb": 64
-    }
+    "warmup_runs": 2
   },
 
   "job_template": {
@@ -40,7 +33,15 @@
     "emon_enable": true,
 
     "extra_env": {
-      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python"    
+      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python",
+
+      "SERVER_NUMACTL_CORES": "0-15",
+      "SERVER_NUMACTL_CPUNODEBIND": "",
+      "SERVER_NUMACTL_MEMBIND": "",
+
+      "NUMACTL_CORES": "16-31",
+      "NUMACTL_CPUNODEBIND": "",
+      "NUMACTL_MEMBIND": ""
     }
   },
 

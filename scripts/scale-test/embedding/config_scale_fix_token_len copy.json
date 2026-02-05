@@ -40,7 +40,13 @@
     "emon_enable": true,
 
     "extra_env": {
-      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python"    
+      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python",
+      "SGLANG_MAX_TOTAL_TOKENS": "32768",
+      "SGLANG_CONTEXT_LENGTH": "2048",
+      "SGLANG_MEM_FRACTION_STATIC": "0.8",
+      "NUMACTL_CORES": "",
+      "NUMACTL_CPUNODEBIND": "",
+      "NUMACTL_MEMBIND": ""
     }
   },
 

@@ -9,6 +9,11 @@ post-processing into `summary.xlsx` using:
 
 `emon -process-pyedp /opt/intel/sep/config/edp/pyedp_config.txt`
 
+Note: `emon -process-pyedp` runs a Python metric post-processor (`pyedp`) under whatever `python3`
+is on your `PATH`. Make sure your active Python environment has the required deps installed:
+
+- `python3 -m pip install -r requirements-emon.txt`
+
 ## Quick start
 
 1) Edit config:
@@ -41,3 +46,19 @@ The runner tries to constrain the entire auto-test process tree (runner + server
 2) Fallback to `taskset -c` (CPU affinity) + `prlimit --as=` (virtual memory cap).
 
 If neither method is available, it runs without enforcement and prints a warning.
+
+## Notes on SGLang caching (important for apples-to-apples TPS)
+
+SGLang maintains a radix/prefix cache. When you run **warmup_runs > 0** and then benchmark the
+**same synthetic inputs again** (same `SYNTHETIC_SEED` / same dataset), the benchmark can become
+dominated by cache hits (server logs show large `#cached-token` and tiny `#new-token`).
+
+This effect is much stronger when **memory is not constrained**, because SGLang may allocate a very
+large KV cache / memory pool based on host RAM, allowing the radix cache to retain far more prompts.
+
+For scale-test token length sweeps we generally want to measure the **true embedding compute** under
+CPU/memory limits (not warmed cache hits). The default scale-test config sets:
+
+- `SGLANG_DISABLE_RADIX_CACHE=1`
+
+If you intentionally want “warm cache” numbers, remove that env var.

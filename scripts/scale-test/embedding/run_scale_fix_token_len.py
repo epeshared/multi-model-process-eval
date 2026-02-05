@@ -65,6 +65,51 @@ def _parse_cpus(expr: str) -> List[int]:
     return sorted(set(out))
 
 
+def _cpu_count(expr: str) -> int:
+    """Return number of logical CPUs described by a linux CPU list expression."""
+
+    try:
+        return len(_parse_cpus(expr))
+    except Exception:
+        return 0
+
+
+def _cpu_to_numa_node(cpu_id: int) -> Optional[int]:
+    """Best-effort map CPU id -> NUMA node id using sysfs."""
+
+    cpu_dir = Path(f"/sys/devices/system/cpu/cpu{int(cpu_id)}")
+    if not cpu_dir.exists():
+        return None
+    try:
+        for child in cpu_dir.iterdir():
+            name = child.name
+            if name.startswith("node") and name[4:].isdigit():
+                return int(name[4:])
+    except Exception:
+        return None
+    return None
+
+
+def _infer_single_numa_node_from_cpu_expr(cpu_expr: str) -> Optional[int]:
+    """Infer a single NUMA node id if all requested CPUs map to the same node."""
+
+    cpus = _parse_cpus(cpu_expr)
+    if not cpus:
+        return None
+
+    nodes: List[int] = []
+    for cpu in cpus[:256]:
+        n = _cpu_to_numa_node(cpu)
+        if n is None:
+            return None
+        nodes.append(n)
+
+    uniq = sorted(set(nodes))
+    if len(uniq) == 1:
+        return uniq[0]
+    return None
+
+
 def _bytes_from_gb(gb: Optional[float]) -> Optional[int]:
     if gb is None:
         return None
@@ -141,6 +186,10 @@ def _wrap_cmd_taskset_prlimit(
 
 
 def _constrained_cmd(*, cmd: List[str], cpu_expr: str, mem_bytes: Optional[int]) -> Tuple[List[str], str]:
+    # If no constraints are requested, return the command unchanged.
+    if not (cpu_expr or "").strip() and not (mem_bytes and mem_bytes > 0):
+        return list(cmd), "none"
+
     sysd = _try_systemd_scope_cmd(cmd=cmd, cpu_expr=cpu_expr, mem_bytes=mem_bytes)
     if sysd is not None:
         return sysd, "systemd-run"
@@ -275,6 +324,24 @@ def _generate_auto_test_config(*, scale: ScaleConfig, result_dir: Path) -> Dict[
     if not isinstance(extra_env, dict):
         extra_env = {}
 
+    # -------------------------
+    # Auto NUMA binding (best-effort)
+    #
+    # Goal: if the user constrains CPUs (e.g. 0-31), we can often infer the
+    # NUMA node and bind server + benchmark to local memory for better
+    # locality and more predictable behavior under MemoryMax.
+    #
+    # We only apply this when:
+    # - scale.cpu_expr is set
+    # - user did not explicitly specify NUMACTL_* / SERVER_NUMACTL_* in extra_env
+    # - server spec does not already configure servers.<backend>.numactl
+    #
+    # If CPUs span multiple nodes, we still bind cores but skip membind/cpunodebind.
+    # -------------------------
+    inferred_node: Optional[int] = None
+    if (scale.cpu_expr or "").strip():
+        inferred_node = _infer_single_numa_node_from_cpu_expr(scale.cpu_expr)
+
     # If the chosen backend uses an HTTP server managed by auto-test, we may
     # need to forward extra env vars into the server start script.
     # In particular, the sglang server script supports SGLANG_PYTHON to pick
@@ -289,6 +356,34 @@ def _generate_auto_test_config(*, scale: ScaleConfig, result_dir: Path) -> Dict[
                 if ks.startswith("SGLANG_"):
                     env_from_job[ks] = ks
             s["env_from_job"] = env_from_job
+
+            # Auto-populate server NUMA binding from scale.cpu_expr when safe.
+            # (Server numactl is configured in the server spec, not via env vars.)
+            user_server_override = any(
+                str(extra_env.get(k) or "").strip()
+                for k in ["SERVER_NUMACTL_CORES", "SERVER_NUMACTL_CPUNODEBIND", "SERVER_NUMACTL_MEMBIND"]
+            )
+            user_job_override = any(
+                str(extra_env.get(k) or "").strip() for k in ["NUMACTL_CORES", "NUMACTL_CPUNODEBIND", "NUMACTL_MEMBIND"]
+            )
+
+            # Only touch server numactl if user didn't opt into explicit controls.
+            # IMPORTANT: the auto-test template config may pin the server to a fixed core range
+            # (e.g. 0-15). For scale-test we want the server to follow the scale CPU constraint.
+            if (scale.cpu_expr or "").strip() and not user_server_override and not user_job_override:
+                numactl = s.get("numactl")
+                numactl_obj: Dict[str, Any] = dict(numactl) if isinstance(numactl, dict) else {}
+
+                # Always bind server cores to the scale CPU expr.
+                numactl_obj["cores"] = scale.cpu_expr.strip()
+
+                # Bind memory locally when we can infer a single NUMA node.
+                if inferred_node is not None and inferred_node >= 0:
+                    numactl_obj["cpunodebind"] = str(inferred_node)
+                    numactl_obj["membind"] = str(inferred_node)
+
+                s["numactl"] = numactl_obj
+
             servers[backend] = s
             cfg["servers"] = servers
     except Exception:
@@ -314,8 +409,31 @@ def _generate_auto_test_config(*, scale: ScaleConfig, result_dir: Path) -> Dict[
                     "SYNTHETIC_TOKEN_LEN": str(int(tl)),
                     "DTYPE": dtype,
                 }
+
+                # Merge user-provided env first (can override any defaults).
                 for k, v in extra_env.items():
                     env[str(k)] = str(v)
+
+                # Auto-populate benchmark NUMA binding when safe.
+                # (This wraps the job command with numactl in run_auto_test.py.)
+                if (scale.cpu_expr or "").strip() and not any(
+                    str(extra_env.get(k) or "").strip()
+                    for k in [
+                        "NUMACTL_CORES",
+                        "NUMACTL_CPUNODEBIND",
+                        "NUMACTL_MEMBIND",
+                        "SERVER_NUMACTL_CORES",
+                        "SERVER_NUMACTL_CPUNODEBIND",
+                        "SERVER_NUMACTL_MEMBIND",
+                    ]
+                ):
+                    if not str(env.get("NUMACTL_CORES") or "").strip():
+                        env["NUMACTL_CORES"] = scale.cpu_expr.strip()
+                    if inferred_node is not None and inferred_node >= 0:
+                        if not str(env.get("NUMACTL_CPUNODEBIND") or "").strip():
+                            env["NUMACTL_CPUNODEBIND"] = str(inferred_node)
+                        if not str(env.get("NUMACTL_MEMBIND") or "").strip():
+                            env["NUMACTL_MEMBIND"] = str(inferred_node)
 
                 jobs.append(
                     {
@@ -379,7 +497,12 @@ def _run_auto_test(
         for line in p.stdout:
             f.write(line)
             if tee:
-                sys.stdout.write(line)
+                try:
+                    sys.stdout.write(line)
+                except BrokenPipeError:
+                    # If output is piped (e.g. `| head`) and the pipe closes early,
+                    # keep running but stop teeing to stdout.
+                    tee = False
         return int(p.wait())
 
 
@@ -511,7 +634,9 @@ def _write_aggregate_csv(*, out_csv: Path, rows: List[Dict[str, Any]]) -> None:
         "emon_process_rc",
         "emon_process_log",
         "resource_cpu",
+        "resource_cpu_count",
         "resource_mem_gb",
+        "tps_per_cpu",
         "emon_kv_json",
     ]
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -528,6 +653,17 @@ def _write_aggregate_csv(*, out_csv: Path, rows: List[Dict[str, Any]]) -> None:
                     r2["emon_kv_json"] = ""
             else:
                 r2["emon_kv_json"] = ""
+
+            # Convenience: allow comparing runs with different CPU caps.
+            try:
+                cpu_count = int(r2.get("resource_cpu_count") or 0)
+            except Exception:
+                cpu_count = 0
+            try:
+                tps = float(r2.get("tps") or 0.0)
+            except Exception:
+                tps = 0.0
+            r2["tps_per_cpu"] = (tps / cpu_count) if cpu_count > 0 else ""
 
             w.writerow({k: r2.get(k, "") for k in fields})
 
@@ -572,6 +708,12 @@ def main() -> int:
     print(f"[info] scale_id={scale_id}")
     print(f"[info] auto-test config: {auto_test_cfg_path}")
 
+    cpu_count = _cpu_count(scale.cpu_expr)
+    if scale.cpu_expr:
+        print(f"[info] CPU expr: {scale.cpu_expr}")
+        if cpu_count > 0:
+            print(f"[info] CPU count: {cpu_count}")
+
     rc = _run_auto_test(
         auto_test_config_path=auto_test_cfg_path,
         work_dir=REPO_ROOT,
@@ -595,6 +737,7 @@ def main() -> int:
         raise SystemExit(f"Missing summary CSV: {summary_csv}")
 
     rows: List[Dict[str, Any]] = []
+    cpu_count = _cpu_count(scale.cpu_expr)
     for row in _iter_summary_rows(summary_csv):
         # Pull emon output path from metrics.json (auto-test stores it there).
         mp = Path(str(row.get("metrics_path") or ""))
@@ -619,6 +762,7 @@ def main() -> int:
         merged["emon_output_path"] = emon_output_path
         merged["batch_size"] = batch_size
         merged["resource_cpu"] = scale.cpu_expr
+        merged["resource_cpu_count"] = cpu_count if cpu_count > 0 else ""
         merged["resource_mem_gb"] = scale.mem_gb if scale.mem_gb is not None else ""
         rows.append(merged)
 

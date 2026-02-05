@@ -83,7 +83,15 @@ class SGLangHTTPEmbeddingClient:
             raise RuntimeError("HTTP session is not initialized")
         url = f"{self.base_url}{path}"
         resp = session.post(url, headers=self._headers(), json=payload, timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = ""
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+            raise RuntimeError(f"SGLang HTTP {resp.status_code} for {url}: {body[:2000]}") from e
         data = resp.json()
         return data if isinstance(data, dict) else {"data": data}
 
@@ -115,7 +123,15 @@ class SGLangHTTPEmbeddingClient:
         if self.model:
             payload["model"] = self.model
         resp = session.post(url, json=payload, timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = ""
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+            raise RuntimeError(f"SGLang HTTP {resp.status_code} for {url}: {body[:2000]}") from e
         data = resp.json()
         if isinstance(data, dict) and "embedding" in data:
             return list(map(float, data["embedding"]))
@@ -135,7 +151,15 @@ class SGLangHTTPEmbeddingClient:
             "encoding_format": "bf16",
         }
         resp = session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = ""
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+            raise RuntimeError(f"SGLang HTTP {resp.status_code} for {url}: {body[:2000]}") from e
         data = resp.json()
         if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], list):
             raise RuntimeError(f"Unexpected response from /v1/embeddings: {data}")
@@ -152,7 +176,15 @@ class SGLangHTTPEmbeddingClient:
             "input": inputs,
         }
         resp = session.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except Exception as e:
+            body = ""
+            try:
+                body = (resp.text or "").strip()
+            except Exception:
+                body = ""
+            raise RuntimeError(f"SGLang HTTP {resp.status_code} for {url}: {body[:2000]}") from e
         data = resp.json()
         if not isinstance(data, dict) or "data" not in data or not isinstance(data["data"], list):
             raise RuntimeError(f"Unexpected response from /v1/embeddings: {data}")
