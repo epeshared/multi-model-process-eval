@@ -392,6 +392,9 @@ def _generate_auto_test_config(
                 ks = str(k)
                 if ks.startswith("SGLANG_"):
                     env_from_job[ks] = ks
+            # Also forward sweep-provided SGLANG settings that may not exist in extra_env.
+            if str(sglang_max_total_tokens or "").strip():
+                env_from_job["SGLANG_MAX_TOTAL_TOKENS"] = "SGLANG_MAX_TOTAL_TOKENS"
             s["env_from_job"] = env_from_job
 
             # Auto-populate server NUMA binding from scale.cpu_expr when safe.

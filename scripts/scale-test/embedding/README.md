@@ -43,6 +43,24 @@ Inside it you’ll find:
 - `<run_id>/...`: per-job logs + `*.metrics.json` (+ `*.emon/emon.dat` when enabled)
 - `aggregate.csv`: merged perf + emon paths (and emon key-values if parsable)
 
+## Analyze a completed run
+
+Given a run directory like:
+
+- `scripts/scale-test/embedding/result/fix_token_len/<scale_id>/`
+
+You can generate post-hoc analysis artifacts (CSVs + plots) via:
+
+- `python3 scripts/scale-test/embedding/analyze_run.py scripts/scale-test/embedding/result/fix_token_len/<scale_id>/`
+
+This writes to `<run_dir>/analysis/`:
+
+- `summary_pivot.csv`: wide pivot table (TPS/latency per token_len × batch_size)
+- `emon_metrics.csv`: extracted EMON metrics (plus `tps_per_watt`)
+- `failed_variants.csv`: failures / missing summaries per variant
+- `plot_tps_vs_token_len.png`
+- `plot_tps_per_watt_vs_token_len.png` (only if EMON power is available)
+
 The top-level `aggregate.csv` includes a `variant` column to distinguish combinations.
 
 ## Sweeping CPU sets / KV cache limit
