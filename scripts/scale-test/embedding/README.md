@@ -57,6 +57,7 @@ This writes to `<run_dir>/analysis/`:
 
 - `summary_pivot.csv`: wide pivot table (TPS/latency per token_len × batch_size)
 - `emon_metrics.csv`: extracted EMON metrics (if present)
+- `emon_socket_metrics.csv`: extracted per-socket EMON metrics from `summary.xlsx` "socket view"
 - `failed_variants.csv`: failures / missing summaries per variant
 - `token_len_scaling.csv`: token length scalability (includes derived `tokens_per_sec`)
 - `batch_size_scaling.csv`: batch size scalability
