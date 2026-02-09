@@ -36,6 +36,10 @@ def _try_import() -> Tuple[Any, Any]:
         raise
 
     try:
+        import matplotlib  # type: ignore
+
+        # Headless-safe backend (common on servers / SSH).
+        matplotlib.use("Agg", force=True)  # type: ignore[attr-defined]
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as e:
         _eprint("ERROR: matplotlib is required for plots")
@@ -110,6 +114,23 @@ def _write_csv(df: Any, path: Path) -> None:
     df.to_csv(path, index=False)
 
 
+def _fmt_point_value(v: Any) -> str:
+    try:
+        x = float(v)
+    except Exception:
+        return str(v)
+    if math.isnan(x) or math.isinf(x):
+        return ""
+    ax = abs(x)
+    if ax >= 1000:
+        return f"{x:.0f}"
+    if ax >= 100:
+        return f"{x:.1f}"
+    if ax >= 10:
+        return f"{x:.2f}"
+    return f"{x:.3f}"
+
+
 def build_failed_variants(df_all: Any, run_dir: Path) -> Any:
     pd = df_all.__class__  # dummy to satisfy type checkers
     # overwritten by caller; here we assume pandas DataFrame.
@@ -149,6 +170,13 @@ def main() -> int:
     out_dir = run_dir / str(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clean up legacy plot names from older versions of this script.
+    for old in ["plot_tps_vs_token_len.png", "plot_tps_per_watt_vs_token_len.png"]:
+        try:
+            (out_dir / old).unlink()
+        except FileNotFoundError:
+            pass
+
     df = pd.read_csv(agg)
     for c in ["variant", "job_name", "resource_cpu", "sglang_max_total_tokens"]:
         if c in df.columns:
@@ -171,6 +199,30 @@ def main() -> int:
     for c in ["tps", "latency_sec", "tps_per_cpu", "avg_batch_time_sec"]:
         if c in df_jobs.columns:
             df_jobs[c] = pd.to_numeric(df_jobs[c], errors="coerce")
+
+    # Derived fields for scalability analysis.
+    if "resource_cpu_count" in df_jobs.columns:
+        df_jobs["cpu_count"] = pd.to_numeric(df_jobs["resource_cpu_count"], errors="coerce")
+    else:
+        df_jobs["cpu_count"] = math.nan
+
+    if "sglang_max_total_tokens" in df_jobs.columns:
+        df_jobs["kv_cap"] = pd.to_numeric(df_jobs["sglang_max_total_tokens"], errors="coerce")
+    else:
+        df_jobs["kv_cap"] = math.nan
+
+    if all(c in df_jobs.columns for c in ["tps", "token_len"]):
+        df_jobs["tokens_per_sec"] = df_jobs["tps"] * df_jobs["token_len"]
+    else:
+        df_jobs["tokens_per_sec"] = math.nan
+
+    if all(c in df_jobs.columns for c in ["tokens_per_sec", "cpu_count"]):
+        df_jobs["tokens_per_sec_per_cpu"] = df_jobs.apply(
+            lambda r: (r["tokens_per_sec"] / r["cpu_count"]) if (pd.notna(r["cpu_count"]) and r["cpu_count"] > 0) else math.nan,
+            axis=1,
+        )
+    else:
+        df_jobs["tokens_per_sec_per_cpu"] = math.nan
 
     # ------------------------------------------------------------------
     # 1) failed_variants.csv
@@ -253,6 +305,43 @@ def main() -> int:
         pd.DataFrame([]).to_csv(out_dir / "summary_pivot.csv", index=False)
 
     # ------------------------------------------------------------------
+    # 2b) Scalability CSVs
+    # ------------------------------------------------------------------
+    # We analyze mean behavior per unique combination; this also collapses repeats.
+    base_dims = [c for c in ["resource_cpu", "cpu_count", "kv_cap", "sglang_max_total_tokens", "batch_size", "token_len"] if c in df_jobs.columns]
+    value_dims = [c for c in ["tps", "tps_per_cpu", "tokens_per_sec", "tokens_per_sec_per_cpu", "avg_batch_time_sec"] if c in df_jobs.columns]
+    df_mean = (
+        df_jobs.groupby(base_dims, as_index=False)[value_dims]
+        .mean(numeric_only=True)
+        .copy()
+        if (base_dims and value_dims and not df_jobs.empty)
+        else pd.DataFrame([])
+    )
+
+    def _sort_by(df_in: Any, cols: List[str]) -> Any:
+        cols2 = [c for c in cols if c in df_in.columns]
+        return df_in.sort_values(cols2, kind="mergesort") if cols2 else df_in
+
+    # token_len scalability: keep (cpu_count, kv_cap, batch_size) fixed, vary token_len.
+    if not df_mean.empty:
+        token_len_scaling = _sort_by(df_mean, ["resource_cpu", "kv_cap", "batch_size", "token_len"])
+        _write_csv(token_len_scaling, out_dir / "token_len_scaling.csv")
+
+        batch_size_scaling = _sort_by(df_mean, ["resource_cpu", "kv_cap", "token_len", "batch_size"])
+        _write_csv(batch_size_scaling, out_dir / "batch_size_scaling.csv")
+
+        cpu_scaling = _sort_by(df_mean, ["kv_cap", "token_len", "batch_size", "cpu_count"])
+        _write_csv(cpu_scaling, out_dir / "cpu_scaling.csv")
+
+        kv_scaling = _sort_by(df_mean, ["cpu_count", "token_len", "batch_size", "kv_cap"])
+        _write_csv(kv_scaling, out_dir / "kv_scaling.csv")
+    else:
+        pd.DataFrame([]).to_csv(out_dir / "token_len_scaling.csv", index=False)
+        pd.DataFrame([]).to_csv(out_dir / "batch_size_scaling.csv", index=False)
+        pd.DataFrame([]).to_csv(out_dir / "cpu_scaling.csv", index=False)
+        pd.DataFrame([]).to_csv(out_dir / "kv_scaling.csv", index=False)
+
+    # ------------------------------------------------------------------
     # 3) emon_metrics.csv
     # ------------------------------------------------------------------
     metrics = list(args.metrics) if args.metrics else list(DEFAULT_METRICS)
@@ -302,97 +391,175 @@ def main() -> int:
     # ------------------------------------------------------------------
     # 4) Plots (matplotlib)
     # ------------------------------------------------------------------
-    # Plot 1: TPS vs token_len, faceted by (cpu_expr, kv_cap), with batch_size as lines.
-    if not df_jobs.empty and all(c in df_jobs.columns for c in ["resource_cpu", "sglang_max_total_tokens", "batch_size", "token_len", "tps"]):
-        cpu_vals = sorted(set(df_jobs["resource_cpu"].astype(str)), key=_safe_int_sort_key)
-        kv_vals = sorted(set(df_jobs["sglang_max_total_tokens"].astype(str)), key=_safe_int_sort_key)
+    # Scalability plots: focus on 4 dimensions.
+    # We use df_mean (mean across repeats) to keep plots readable.
+    if not df_mean.empty:
+        # Helper: plot lines by a categorical variable.
+        def _plot_lines(
+            *,
+            ax: Any,
+            data: Any,
+            x: str,
+            y: str,
+            line_by: str,
+            title: str,
+            xlabel: str,
+            ylabel: str,
+            annotate_points: bool = True,
+        ) -> None:
+            if data.empty:
+                ax.set_axis_off()
+                return
 
-        nrows = max(1, len(cpu_vals))
-        ncols = max(1, len(kv_vals))
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4.8 * ncols, 3.6 * nrows), squeeze=False)
+            g = data.dropna(subset=[x, y]).copy()
+            if g.empty:
+                ax.set_axis_off()
+                return
 
-        for i, cpu in enumerate(cpu_vals):
-            for j, kv in enumerate(kv_vals):
-                ax = axes[i][j]
-                sub = df_jobs[(df_jobs["resource_cpu"].astype(str) == cpu) & (df_jobs["sglang_max_total_tokens"].astype(str) == kv)].copy()
-                if sub.empty:
-                    ax.set_axis_off()
-                    continue
+            for line_idx, (k, g2) in enumerate(g.groupby(line_by)):
+                g2 = g2.sort_values(x)
+                ax.plot(g2[x], g2[y], marker="o", linewidth=1.8, label=f"{line_by}={k}")
+                if annotate_points:
+                    xs = list(g2[x])
+                    ys = list(g2[y])
+                    for px, py in zip(xs, ys):
+                        s = _fmt_point_value(py)
+                        if not s:
+                            continue
+                        ax.annotate(
+                            s,
+                            (px, py),
+                            textcoords="offset points",
+                            xytext=(0, 6 + 8 * (line_idx % 3)),
+                            ha="center",
+                            va="bottom",
+                            fontsize=7,
+                            alpha=0.9,
+                        )
+            ax.set_title(title)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8)
 
-                # Mean TPS per (batch_size, token_len)
-                g = (
-                    sub.groupby(["batch_size", "token_len"], as_index=False)["tps"]
-                    .mean(numeric_only=True)
-                    .sort_values(["batch_size", "token_len"])
-                )
-                for bs, g2 in g.groupby("batch_size"):
-                    ax.plot(g2["token_len"], g2["tps"], marker="o", linewidth=1.8, label=f"bs={int(bs)}")
+        cpu_vals = sorted(set(df_mean["resource_cpu"].astype(str)), key=_safe_int_sort_key) if "resource_cpu" in df_mean.columns else []
+        kv_vals = sorted(set(df_mean["kv_cap"].dropna().astype(int)), key=lambda x: x) if "kv_cap" in df_mean.columns else []
+        tl_vals = sorted(set(df_mean["token_len"].dropna().astype(int)), key=lambda x: x) if "token_len" in df_mean.columns else []
 
-                ax.set_title(f"cpu={cpu} | kv={kv}")
-                ax.set_xlabel("token_len")
-                ax.set_ylabel("TPS")
-                ax.grid(True, alpha=0.25)
-                ax.legend(fontsize=9)
-
-        fig.tight_layout()
-        fig.savefig(out_dir / "plot_tps_vs_token_len.png", dpi=160)
-        plt.close(fig)
-
-    # Plot 2: TPS/Watt vs token_len (requires emon power)
-    if "emon_kv_json" in df_jobs.columns and not df_jobs.empty:
-        def _extract_power(s: str) -> Optional[float]:
-            try:
-                kv = json.loads(s)
-            except Exception:
-                return None
-            return _to_float(kv.get("metric_package power (watts)"))
-
-        tmp = df_jobs.copy()
-        tmp["package_power_w"] = tmp["emon_kv_json"].fillna("").astype(str).apply(_extract_power)
-        tmp = tmp[(tmp["package_power_w"].notna()) & (tmp["package_power_w"] > 0)]
-        if not tmp.empty and all(c in tmp.columns for c in ["resource_cpu", "sglang_max_total_tokens", "batch_size", "token_len", "tps"]):
-            tmp["tps_per_watt"] = tmp["tps"] / tmp["package_power_w"]
-
-            cpu_vals = sorted(set(tmp["resource_cpu"].astype(str)), key=_safe_int_sort_key)
-            kv_vals = sorted(set(tmp["sglang_max_total_tokens"].astype(str)), key=_safe_int_sort_key)
-
+        # Plot A: token_len scalability (use tokens_per_sec to normalize by input size)
+        if all(c in df_mean.columns for c in ["resource_cpu", "kv_cap", "batch_size", "token_len", "tokens_per_sec"]):
             nrows = max(1, len(cpu_vals))
             ncols = max(1, len(kv_vals))
-            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4.8 * ncols, 3.6 * nrows), squeeze=False)
-
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.8 * nrows), squeeze=False)
             for i, cpu in enumerate(cpu_vals):
                 for j, kv in enumerate(kv_vals):
                     ax = axes[i][j]
-                    sub = tmp[(tmp["resource_cpu"].astype(str) == cpu) & (tmp["sglang_max_total_tokens"].astype(str) == kv)].copy()
-                    if sub.empty:
-                        ax.set_axis_off()
-                        continue
-
-                    g = (
-                        sub.groupby(["batch_size", "token_len"], as_index=False)["tps_per_watt"]
-                        .mean(numeric_only=True)
-                        .sort_values(["batch_size", "token_len"])
+                    sub = df_mean[(df_mean["resource_cpu"].astype(str) == cpu) & (df_mean["kv_cap"].astype(float) == float(kv))].copy()
+                    _plot_lines(
+                        ax=ax,
+                        data=sub,
+                        x="token_len",
+                        y="tokens_per_sec",
+                        line_by="batch_size",
+                        title=f"Token-len scaling | cpu={cpu} | kv={kv}",
+                        xlabel="token_len",
+                        ylabel="tokens/sec (tps * token_len)",
                     )
-                    for bs, g2 in g.groupby("batch_size"):
-                        ax.plot(g2["token_len"], g2["tps_per_watt"], marker="o", linewidth=1.8, label=f"bs={int(bs)}")
-
-                    ax.set_title(f"cpu={cpu} | kv={kv}")
-                    ax.set_xlabel("token_len")
-                    ax.set_ylabel("TPS/W")
-                    ax.grid(True, alpha=0.25)
-                    ax.legend(fontsize=9)
-
             fig.tight_layout()
-            fig.savefig(out_dir / "plot_tps_per_watt_vs_token_len.png", dpi=160)
+            fig.savefig(out_dir / "plot_token_len_scaling.png", dpi=160)
+            plt.close(fig)
+
+        # Plot B: batch_size scalability (TPS vs batch_size)
+        if all(c in df_mean.columns for c in ["resource_cpu", "kv_cap", "batch_size", "token_len", "tps"]):
+            nrows = max(1, len(cpu_vals))
+            ncols = max(1, len(kv_vals))
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.8 * nrows), squeeze=False)
+            for i, cpu in enumerate(cpu_vals):
+                for j, kv in enumerate(kv_vals):
+                    ax = axes[i][j]
+                    sub = df_mean[(df_mean["resource_cpu"].astype(str) == cpu) & (df_mean["kv_cap"].astype(float) == float(kv))].copy()
+                    _plot_lines(
+                        ax=ax,
+                        data=sub,
+                        x="batch_size",
+                        y="tps",
+                        line_by="token_len",
+                        title=f"Batch scaling | cpu={cpu} | kv={kv}",
+                        xlabel="batch_size",
+                        ylabel="samples/sec (tps)",
+                    )
+            fig.tight_layout()
+            fig.savefig(out_dir / "plot_batch_size_scaling.png", dpi=160)
+            plt.close(fig)
+
+        # Plot C: CPU scaling (TPS vs cpu_count)
+        if all(c in df_mean.columns for c in ["cpu_count", "kv_cap", "batch_size", "token_len", "tps"]):
+            # Make a grid by kv_cap (cols) and token_len (rows)
+            nrows = max(1, len(tl_vals))
+            ncols = max(1, len(kv_vals))
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.8 * nrows), squeeze=False)
+            for i, tl in enumerate(tl_vals):
+                for j, kv in enumerate(kv_vals):
+                    ax = axes[i][j]
+                    sub = df_mean[(df_mean["token_len"].astype(float) == float(tl)) & (df_mean["kv_cap"].astype(float) == float(kv))].copy()
+                    # Use batch_size as lines (common scaling dimension)
+                    _plot_lines(
+                        ax=ax,
+                        data=sub,
+                        x="cpu_count",
+                        y="tps",
+                        line_by="batch_size",
+                        title=f"CPU scaling | tok={tl} | kv={kv}",
+                        xlabel="CPU cores (count)",
+                        ylabel="samples/sec (tps)",
+                    )
+            fig.tight_layout()
+            fig.savefig(out_dir / "plot_cpu_scaling.png", dpi=160)
+            plt.close(fig)
+
+        # Plot D: KV cap scaling (TPS vs kv_cap)
+        if all(c in df_mean.columns for c in ["cpu_count", "kv_cap", "batch_size", "token_len", "tps"]):
+            cpu_counts = sorted(set(df_mean["cpu_count"].dropna().astype(int)), key=lambda x: x)
+            nrows = max(1, len(cpu_counts))
+            ncols = max(1, len(tl_vals))
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.8 * nrows), squeeze=False)
+            for i, cc in enumerate(cpu_counts):
+                for j, tl in enumerate(tl_vals):
+                    ax = axes[i][j]
+                    sub = df_mean[(df_mean["cpu_count"].astype(float) == float(cc)) & (df_mean["token_len"].astype(float) == float(tl))].copy()
+                    _plot_lines(
+                        ax=ax,
+                        data=sub,
+                        x="kv_cap",
+                        y="tps",
+                        line_by="batch_size",
+                        title=f"KV scaling | cpu={cc} | tok={tl}",
+                        xlabel="SGLANG max_total_tokens (cap)",
+                        ylabel="samples/sec (tps)",
+                    )
+            fig.tight_layout()
+            fig.savefig(out_dir / "plot_kv_cap_scaling.png", dpi=160)
             plt.close(fig)
 
     print(f"[ok] Wrote: {out_dir / 'summary_pivot.csv'}")
     print(f"[ok] Wrote: {out_dir / 'emon_metrics.csv'}")
     print(f"[ok] Wrote: {out_dir / 'failed_variants.csv'}")
-    if (out_dir / "plot_tps_vs_token_len.png").exists():
-        print(f"[ok] Plot:  {out_dir / 'plot_tps_vs_token_len.png'}")
-    if (out_dir / "plot_tps_per_watt_vs_token_len.png").exists():
-        print(f"[ok] Plot:  {out_dir / 'plot_tps_per_watt_vs_token_len.png'}")
+    for p in [
+        out_dir / "token_len_scaling.csv",
+        out_dir / "batch_size_scaling.csv",
+        out_dir / "cpu_scaling.csv",
+        out_dir / "kv_scaling.csv",
+    ]:
+        if p.exists():
+            print(f"[ok] Wrote: {p}")
+    for p in [
+        out_dir / "plot_token_len_scaling.png",
+        out_dir / "plot_batch_size_scaling.png",
+        out_dir / "plot_cpu_scaling.png",
+        out_dir / "plot_kv_cap_scaling.png",
+    ]:
+        if p.exists():
+            print(f"[ok] Plot:  {p}")
 
     return 0
 

@@ -56,10 +56,16 @@ You can generate post-hoc analysis artifacts (CSVs + plots) via:
 This writes to `<run_dir>/analysis/`:
 
 - `summary_pivot.csv`: wide pivot table (TPS/latency per token_len × batch_size)
-- `emon_metrics.csv`: extracted EMON metrics (plus `tps_per_watt`)
+- `emon_metrics.csv`: extracted EMON metrics (if present)
 - `failed_variants.csv`: failures / missing summaries per variant
-- `plot_tps_vs_token_len.png`
-- `plot_tps_per_watt_vs_token_len.png` (only if EMON power is available)
+- `token_len_scaling.csv`: token length scalability (includes derived `tokens_per_sec`)
+- `batch_size_scaling.csv`: batch size scalability
+- `cpu_scaling.csv`: CPU core scalability
+- `kv_scaling.csv`: KV cap (`SGLANG_MAX_TOTAL_TOKENS`) scalability
+- `plot_token_len_scaling.png`
+- `plot_batch_size_scaling.png`
+- `plot_cpu_scaling.png`
+- `plot_kv_cap_scaling.png`
 
 The top-level `aggregate.csv` includes a `variant` column to distinguish combinations.
 
