@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import json
 import math
 import sys
@@ -9,17 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-DEFAULT_METRICS = [
-    "metric_CPU operating frequency (in GHz)",
-    "metric_uncore frequency GHz",
-    "metric_DDR data rate (MT/sec)",
-    "metric_memory bandwidth total (MB/sec)",
-    "metric_CPI",
-    "metric_core IPC",
-    "metric_CPU utilization %",
-    "metric_package power (watts)",
-    "metric_NUMA %_Reads addressed to remote DRAM",
-]
+DEFAULT_METRICS: List[str] = []
 
 
 DEFAULT_SOCKET_VIEW_METRICS = [
@@ -156,6 +148,391 @@ def _sanitize_header(s: Any) -> str:
     return out
 
 
+def _norm_metric_name(s: Any) -> str:
+    """Normalize metric names to be resilient to minor formatting diffs.
+
+    - lower
+    - remove spaces and underscores
+    - collapse repeated dots
+    """
+    t = str(s).strip().lower()
+    t = t.replace(" ", "")
+    t = t.replace("_", "")
+    # keep percent and parentheses since they help disambiguate
+    while ".." in t:
+        t = t.replace("..", ".")
+    return t
+
+
+def _fmt_metric_value(metric: str, v: Any) -> str:
+    x = _to_float(v)
+    if x is None:
+        return ""
+    m = str(metric)
+    is_pct = "(%)" in m or "utilization" in m.lower() or "residency" in m.lower() or "tma_" in m.lower()
+    if is_pct:
+        return f"{x:.2f}%" if x < 1 and "(%)" in m else f"{x:.2f}"
+    if abs(x) >= 1000:
+        return f"{x:.0f}"
+    if abs(x) >= 100:
+        return f"{x:.2f}"
+    return f"{x:.3f}"
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _sanitize_job_id(job_name: str, *, max_len: int = 80) -> str:
+    """Create a filesystem-safe, mostly-human-readable id for a job.
+
+    We append a short hash to avoid collisions when job names are long/similar.
+    """
+    raw = str(job_name or "").strip()
+    if not raw:
+        raw = "job"
+    out = []
+    for ch in raw:
+        if ch.isalnum() or ch in {".", "-", "_"}:
+            out.append(ch)
+        else:
+            out.append("_")
+    s = "".join(out)
+    while "__" in s:
+        s = s.replace("__", "_")
+    s = s.strip("._-") or "job"
+    if len(s) > max_len:
+        s = s[:max_len]
+    h = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return f"{s}__{h}"
+
+
+def _render_run_summary_html(
+    *,
+    run_dir: Path,
+    out_dir: Path,
+    df_jobs: Any,
+    failed_variants: Any,
+    df_socket: Any,
+    wanted_metrics: List[str],
+) -> str:
+    pd = df_jobs.__class__  # dummy
+
+    def _h3(title: str) -> str:
+        return f"<h3>{html.escape(title)}</h3>"
+
+    def _kv_table(title: str, rows: List[Tuple[str, str]]) -> str:
+        trs = "".join(
+            f"<tr><td class=\"mono\">{html.escape(k)}</td><td class=\"mono\">{html.escape(v)}</td></tr>" for k, v in rows
+        )
+        return (
+            f"{_h3(title)}"
+            "<div class=\"table-scroll\">"
+            "<table class=\"table small\">"
+            "<thead><tr><th>key</th><th>value</th></tr></thead>"
+            f"<tbody>{trs}</tbody>"
+            "</table>"
+            "</div>"
+        )
+
+    def _impact_level_from_ratio(r: float) -> Tuple[str, str]:
+        # r ~= (max/min) within-group variability
+        if r >= 3.0:
+            return ("高", "strong")
+        if r >= 1.5:
+            return ("中", "warn")
+        return ("低", "ok")
+
+    def _impact_level_from_eff(e: float) -> Tuple[str, str]:
+        # higher is better
+        if e >= 0.80:
+            return ("好", "ok")
+        if e >= 0.60:
+            return ("一般", "warn")
+        return ("较差", "strong")
+
+    def _read_scaling_csv(name: str) -> Any:
+        try:
+            p = out_dir / name
+            if not p.exists():
+                return None
+            return __import__("pandas").read_csv(p)  # type: ignore
+        except Exception:
+            return None
+
+    def _to_num(pd_mod: Any, s: Any) -> Any:
+        try:
+            return pd_mod.to_numeric(s, errors="coerce")
+        except Exception:
+            return s
+
+    def _scaling_summary(
+        *,
+        title: str,
+        df: Any,
+        x: str,
+        group_cols: List[str],
+        y: str = "tps",
+        corr_y: str | None = None,
+    ) -> Tuple[str, Dict[str, float]]:
+        stats_out: Dict[str, float] = {}
+        if df is None or getattr(df, "empty", True):
+            return (f"<h3>{html.escape(title)}</h3><div class=\"muted\">No data.</div>", stats_out)
+        pd_mod = __import__("pandas")
+
+        cols = set(getattr(df, "columns", []))
+        need = [x, y] + [c for c in group_cols]
+        if not all(c in cols for c in need):
+            return (
+                f"<h3>{html.escape(title)}</h3>"
+                f"<div class=\"muted\">Missing required columns: {html.escape(', '.join([c for c in need if c not in cols]))}</div>"
+            , stats_out)
+
+        d = df.dropna(subset=need).copy()
+        if getattr(d, "empty", True):
+            return (f"<h3>{html.escape(title)}</h3><div class=\"muted\">No non-empty rows.</div>", stats_out)
+        d[x] = _to_num(pd_mod, d[x])
+        d[y] = _to_num(pd_mod, d[y])
+
+        # Per-group best-x (argmax y) and variability across x.
+        best_x: List[float] = []
+        ratios: List[float] = []
+        cors: List[float] = []
+        n_groups = 0
+        for _, g in d.groupby(group_cols, dropna=True):
+            n_groups += 1
+            g2 = g.dropna(subset=[x, y]).copy()
+            if g2.empty or g2[x].nunique() < 2:
+                continue
+            try:
+                r = g2.loc[g2[y].idxmax()]
+                best_x.append(float(r[x]))
+            except Exception:
+                pass
+            try:
+                ymin = float(g2[y].min())
+                ymax = float(g2[y].max())
+                if ymin > 0:
+                    ratios.append(ymax / ymin)
+            except Exception:
+                pass
+            if corr_y is not None and corr_y in cols:
+                try:
+                    g3 = g2.dropna(subset=[x, corr_y]).copy()
+                    g3[corr_y] = _to_num(pd_mod, g3[corr_y])
+                    if not g3.empty and g3[x].nunique() >= 2:
+                        corr = g3[[x, corr_y]].corr(numeric_only=True).iloc[0, 1]
+                        if corr == corr:
+                            cors.append(float(corr))
+                except Exception:
+                    pass
+
+        def _q(vals: List[float], q: float) -> str:
+            if not vals:
+                return ""
+            try:
+                return f"{float(pd_mod.Series(vals).quantile(q)):.2f}"
+            except Exception:
+                return ""
+
+        items: List[str] = []
+        rows_n = float(len(d))
+        groups_n = float(n_groups)
+        stats_out["rows"] = rows_n
+        stats_out["groups"] = groups_n
+
+        med_best = float(pd_mod.Series(best_x).median()) if best_x else float("nan")
+        med_ratio = float(pd_mod.Series(ratios).median()) if ratios else float("nan")
+        p90_ratio = float(pd_mod.Series(ratios).quantile(0.90)) if ratios else float("nan")
+        med_corr = float(pd_mod.Series(cors).median()) if cors else float("nan")
+        if med_best == med_best:
+            stats_out["median_best_x"] = med_best
+        if med_ratio == med_ratio:
+            stats_out["median_ratio"] = med_ratio
+        if p90_ratio == p90_ratio:
+            stats_out["p90_ratio"] = p90_ratio
+        if med_corr == med_corr:
+            stats_out["median_corr"] = med_corr
+
+        impact_label = ""
+        impact_class = ""
+        if med_ratio == med_ratio:
+            impact_label, impact_class = _impact_level_from_ratio(med_ratio)
+
+        # PPT-ready narrative
+        takeaway = ""
+        if x == "batch_size":
+            takeaway = "批量大小主要影响吞吐上限；本次 sweep 中整体影响" + ("较小" if (med_ratio == med_ratio and med_ratio < 1.5) else "较大") + "。"
+        elif x == "kv_cap":
+            takeaway = "KV cap 是关键瓶颈维度之一；不同 kv_cap 下 TPS 波动明显。"
+        elif x == "token_len":
+            takeaway = "token_len 改变会显著影响单位时间可处理的 token 数；通常 token_len 越大 tokens/sec 越低。"
+        else:
+            takeaway = f"{x} 会改变整体性能表现。"
+
+        rec = ""
+        if med_best == med_best:
+            rec = f"建议优先选择 {x}≈{med_best:.0f}（按当前 sweep 的中位最优点）。"
+        if x == "token_len" and (med_corr == med_corr):
+            if med_corr <= -0.3:
+                rec = "在固定 cpu/kv/bs 下，token_len 增大时 tokens/sec 往往下降；建议对齐目标场景的 token_len 做对比，避免用单一 token_len 代表所有场景。"
+        if x == "kv_cap" and (med_ratio == med_ratio and med_ratio >= 1.5):
+            rec = "KV cap 对 TPS 影响较大；建议优先确认不会被 KV 上限卡住（必要时提升 SGLANG_MAX_TOTAL_TOKENS / kv_cap）。"
+        if x == "batch_size" and (med_ratio == med_ratio and med_ratio < 1.2):
+            rec = "batch_size 对 TPS 的总体影响较小；可优先以延迟/内存压力为约束来选 batch_size。"
+
+        items.append(f"<li><b>一句话结论</b>：{html.escape(takeaway)}</li>")
+        if impact_label:
+            items.append(f"<li><b>总体影响等级</b>：<span class=\"pill {impact_class}\">{html.escape(impact_label)}</span>（以组内 max/min 作为影响强度衡量）</li>")
+        items.append(f"<li><b>统计口径</b>：基于 {html.escape(title)}（mean across repeats），rows={int(rows_n)}, groups={int(groups_n)}（按 {html.escape(','.join(group_cols))} 分组）</li>")
+        if med_best == med_best:
+            items.append(f"<li><b>中位最优点</b>：{html.escape(x)}≈<b>{med_best:.0f}</b>（argmax {html.escape(y)}）</li>")
+        if med_ratio == med_ratio:
+            items.append(f"<li><b>影响幅度</b>：组内 {html.escape(y)} 的 median(max/min)=<b>{med_ratio:.2f}×</b>（p90 {p90_ratio:.2f}×）</li>")
+        if corr_y and (med_corr == med_corr):
+            items.append(f"<li><b>趋势</b>：median corr({html.escape(x)}, {html.escape(corr_y)})=<b>{med_corr:.2f}</b></li>")
+        if rec:
+            items.append(f"<li><b>建议</b>：{html.escape(rec)}</li>")
+
+        return (f"<h3>{html.escape(title)}</h3><ul>{''.join(items)}</ul>", stats_out)
+
+    token_df = _read_scaling_csv("token_len_scaling.csv")
+    bs_df = _read_scaling_csv("batch_size_scaling.csv")
+    cpu_df = _read_scaling_csv("cpu_scaling.csv")
+    kv_df = _read_scaling_csv("kv_scaling.csv")
+
+    parts: List[str] = []
+    parts.append('<div class="sub">Scale Test 总结（可直接放 PPT）：按四个 *_scaling.csv 给出总体影响与建议</div>')
+
+    token_y = "tokens_per_sec" if token_df is not None and "tokens_per_sec" in getattr(token_df, "columns", []) else "tps"
+    token_corr_y = "tokens_per_sec" if token_df is not None and "tokens_per_sec" in getattr(token_df, "columns", []) else None
+    token_html, token_stats = _scaling_summary(
+        title="token_len_scaling.csv",
+        df=token_df,
+        x="token_len",
+        group_cols=["cpu_count", "kv_cap", "batch_size"],
+        y=token_y,
+        corr_y=token_corr_y,
+    )
+    bs_html, bs_stats = _scaling_summary(
+        title="batch_size_scaling.csv",
+        df=bs_df,
+        x="batch_size",
+        group_cols=["cpu_count", "kv_cap", "token_len"],
+        y="tps",
+        corr_y=None,
+    )
+    kv_html, kv_stats = _scaling_summary(
+        title="kv_scaling.csv",
+        df=kv_df,
+        x="kv_cap",
+        group_cols=["cpu_count", "batch_size", "token_len"],
+        y="tps",
+        corr_y=None,
+    )
+
+    # CPU scaling summary (speedup + efficiency)
+    cpu_html = "<h3>cpu_scaling.csv</h3><div class=\"muted\">No data.</div>"
+    cpu_stats: Dict[str, float] = {}
+    try:
+        if cpu_df is not None and not getattr(cpu_df, "empty", True):
+            pd_mod = __import__("pandas")
+            need = ["cpu_count", "tps", "kv_cap", "batch_size", "token_len"]
+            if all(c in cpu_df.columns for c in need):
+                d = cpu_df.dropna(subset=need).copy()
+                d["cpu_count"] = pd_mod.to_numeric(d["cpu_count"], errors="coerce")
+                d["tps"] = pd_mod.to_numeric(d["tps"], errors="coerce")
+                speedups: List[float] = []
+                effs: List[float] = []
+                for _, g in d.groupby(["kv_cap", "batch_size", "token_len"], dropna=True):
+                    g2 = g.sort_values("cpu_count")
+                    if g2["cpu_count"].nunique() < 2:
+                        continue
+                    min_cpu = float(g2["cpu_count"].iloc[0])
+                    max_cpu = float(g2["cpu_count"].iloc[-1])
+                    tps_min = float(g2["tps"].iloc[0])
+                    tps_max = float(g2["tps"].iloc[-1])
+                    if min_cpu <= 0 or max_cpu <= 0 or tps_min <= 0:
+                        continue
+                    speedup = tps_max / tps_min
+                    ideal = max_cpu / min_cpu
+                    eff = speedup / ideal
+                    speedups.append(speedup)
+                    effs.append(eff)
+                med_speed = float(pd_mod.Series(speedups).median()) if speedups else float("nan")
+                med_eff = float(pd_mod.Series(effs).median()) if effs else float("nan")
+                if med_speed == med_speed:
+                    cpu_stats["median_speedup"] = med_speed
+                if med_eff == med_eff:
+                    cpu_stats["median_eff"] = med_eff
+
+                lvl, cls = ("", "")
+                if med_eff == med_eff:
+                    lvl, cls = _impact_level_from_eff(med_eff)
+
+                takeaway = "CPU 核数增加能提升吞吐，但总体呈次线性；需要关注并行效率。"
+                rec = ""
+                if med_eff == med_eff:
+                    if med_eff >= 0.80:
+                        rec = "CPU 扩展性较好；可优先用更多核数提升吞吐，注意 NUMA/绑核一致性。"
+                    elif med_eff >= 0.60:
+                        rec = "CPU 扩展性一般；建议优先排查线程/NUMA/内存带宽瓶颈，并结合 kv_cap 调优。"
+                    else:
+                        rec = "CPU 扩展性较差；优先优化瓶颈（kv_cap/带宽/调度），否则单纯加核收益有限。"
+
+                items: List[str] = []
+                items.append(f"<li><b>一句话结论</b>：{html.escape(takeaway)}</li>")
+                if lvl:
+                    items.append(f"<li><b>扩展性评价</b>：<span class=\"pill {cls}\">{html.escape(lvl)}</span>（以效率衡量）</li>")
+                items.append(f"<li><b>统计口径</b>：基于 cpu_scaling.csv（mean across repeats），rows={len(d)}, groups={d.groupby(['kv_cap','batch_size','token_len']).ngroups}</li>")
+                if med_speed == med_speed:
+                    items.append(f"<li><b>中位加速比</b>：min→max cpu_count 的 median speedup=<b>{med_speed:.2f}×</b></li>")
+                if med_eff == med_eff:
+                    items.append(f"<li><b>中位并行效率</b>：median efficiency vs ideal linear=<b>{med_eff:.2f}</b></li>")
+                if rec:
+                    items.append(f"<li><b>建议</b>：{html.escape(rec)}</li>")
+                cpu_html = f"<h3>cpu_scaling.csv</h3><ul>{''.join(items)}</ul>"
+    except Exception:
+        pass
+
+    # Overall impact ranking (by median max/min ratio when available)
+    rank_items: List[Tuple[str, float]] = []
+    for name, st in [
+        ("token_len", token_stats),
+        ("batch_size", bs_stats),
+        ("kv_cap", kv_stats),
+    ]:
+        r = st.get("median_ratio")
+        if r is not None:
+            try:
+                rr = float(r)
+                if rr == rr:
+                    rank_items.append((name, rr))
+            except Exception:
+                pass
+    rank_items.sort(key=lambda t: t[1], reverse=True)
+    rank_html = "<div class=\"muted\">No ranking available.</div>"
+    if rank_items:
+        lis = "".join(
+            f"<li><span class=\"mono\">{html.escape(n)}</span>：median(max/min)=<b>{v:.2f}×</b></li>" for n, v in rank_items
+        )
+        rank_html = f"<ul>{lis}</ul>"
+
+    parts.append(_h3("总体结论（影响强度排序）"))
+    parts.append(
+        "<div class=\"sub\">说明：以各维度在固定其它条件下的组内 TPS/throughput 波动（median max/min）衡量影响强度；CPU 另用 speedup/efficiency 描述。</div>"
+    )
+    parts.append(rank_html)
+
+    parts.append(token_html)
+    parts.append(bs_html)
+    parts.append(cpu_html)
+    parts.append(kv_html)
+
+    return "\n\n".join(parts)
+
+
 def _extract_socket_view_from_xlsx(
     *,
     pd: Any,
@@ -238,7 +615,7 @@ def main() -> int:
         "--metrics",
         nargs="*",
         default=None,
-        help="EMON metric keys to extract (defaults to a curated set)",
+        help="(deprecated) previously extracted emon_metrics.csv; no longer used",
     )
     ap.add_argument(
         "--socket-metrics",
@@ -269,6 +646,12 @@ def main() -> int:
             (out_dir / old).unlink()
         except FileNotFoundError:
             pass
+
+    # Clean up deprecated output.
+    try:
+        (out_dir / "emon_metrics.csv").unlink()
+    except FileNotFoundError:
+        pass
 
     df = pd.read_csv(agg)
     for c in ["variant", "job_name", "resource_cpu", "sglang_max_total_tokens"]:
@@ -435,54 +818,7 @@ def main() -> int:
         pd.DataFrame([]).to_csv(out_dir / "kv_scaling.csv", index=False)
 
     # ------------------------------------------------------------------
-    # 3) emon_metrics.csv
-    # ------------------------------------------------------------------
-    metrics = list(args.metrics) if args.metrics else list(DEFAULT_METRICS)
-
-    if "emon_kv_json" in df_jobs.columns:
-        rows: List[Dict[str, Any]] = []
-        for _, r in df_jobs.iterrows():
-            emon_json = str(r.get("emon_kv_json") or "").strip()
-            if not emon_json:
-                continue
-            try:
-                kv = json.loads(emon_json)
-            except Exception:
-                continue
-
-            rec: Dict[str, Any] = {
-                "variant": r.get("variant", ""),
-                "job_name": r.get("job_name", ""),
-                "resource_cpu": r.get("resource_cpu", ""),
-                "resource_cpu_count": r.get("resource_cpu_count", ""),
-                "resource_mem_gb": r.get("resource_mem_gb", ""),
-                "sglang_max_total_tokens": r.get("sglang_max_total_tokens", ""),
-                "batch_size": r.get("batch_size", ""),
-                "token_len": r.get("token_len", ""),
-                "tps": r.get("tps", ""),
-                "latency_sec": r.get("latency_sec", ""),
-                "tps_per_cpu": r.get("tps_per_cpu", ""),
-                "emon_summary_xlsx": r.get("emon_summary_xlsx", ""),
-                "emon_output_path": r.get("emon_output_path", ""),
-            }
-
-            for k in metrics:
-                rec[k] = kv.get(k, "")
-
-            # Convenience: efficiency
-            pw = _to_float(kv.get("metric_package power (watts)"))
-            tps = _to_float(r.get("tps"))
-            rec["tps_per_watt"] = (tps / pw) if (pw and pw > 0 and tps is not None) else ""
-
-            rows.append(rec)
-
-        df_emon = pd.DataFrame(rows)
-        _write_csv(df_emon, out_dir / "emon_metrics.csv")
-    else:
-        pd.DataFrame([]).to_csv(out_dir / "emon_metrics.csv", index=False)
-
-    # ------------------------------------------------------------------
-    # 3b) emon_socket_metrics.csv (socket view)
+    # 3) emon_socket_metrics.csv (socket view)
     # ------------------------------------------------------------------
     socket_metrics = list(args.socket_metrics) if args.socket_metrics else list(DEFAULT_SOCKET_VIEW_METRICS)
     socket_rows: List[Dict[str, Any]] = []
@@ -490,8 +826,19 @@ def main() -> int:
     if "emon_summary_xlsx" in df_jobs.columns and not df_jobs.empty:
         cache: Dict[str, Dict[str, Any]] = {}
         for _, r in df_jobs.iterrows():
-            xlsx = str(r.get("emon_summary_xlsx") or "").strip()
-            if not xlsx:
+            xlsx_raw = r.get("emon_summary_xlsx")
+            try:
+                if pd.isna(xlsx_raw):
+                    continue
+            except Exception:
+                pass
+            xlsx = str(xlsx_raw or "").strip()
+            if not xlsx or xlsx.lower() in {"nan", "none"}:
+                continue
+            try:
+                if not Path(xlsx).is_file():
+                    continue
+            except Exception:
                 continue
             if xlsx not in cache:
                 cache[xlsx] = _extract_socket_view_from_xlsx(pd=pd, xlsx_path=xlsx, wanted_metrics=socket_metrics)
@@ -513,6 +860,137 @@ def main() -> int:
         _write_csv(df_socket, out_dir / "emon_socket_metrics.csv")
     else:
         pd.DataFrame([]).to_csv(out_dir / "emon_socket_metrics.csv", index=False)
+
+    # ------------------------------------------------------------------
+    # 3c) EMON socket TMA pie charts + per-run HTML summary
+    # ------------------------------------------------------------------
+    # Pie chart: for each socket, show 4 top-level TMA percentages.
+    tma_top = [
+        "metric_TMA_Frontend_Bound(%)",
+        "metric_TMA_Bad_Speculation(%)",
+        "metric_TMA_Retiring(%)",
+        "metric_TMA_Backend_Bound(%)",
+    ]
+
+    df_socket_loaded = None
+    try:
+        df_socket_loaded = pd.read_csv(out_dir / "emon_socket_metrics.csv")
+    except Exception:
+        df_socket_loaded = None
+
+    if df_socket_loaded is not None and not df_socket_loaded.empty:
+        # --------------------------------------------------------------
+        # Per-job socket TMA pie charts (job page in web UI)
+        # --------------------------------------------------------------
+        # We write a manifest so the web server can locate images
+        # without guessing filename sanitization rules.
+        job_pies_dir = out_dir / "emon_job"
+        manifest: Dict[str, Any] = {}
+        try:
+            socket_cols2 = [c for c in df_socket_loaded.columns if c.startswith("socket_") and "__" in c]
+            sockets2 = sorted({c.split("__", 1)[0] for c in socket_cols2})
+        except Exception:
+            sockets2 = []
+
+        for _, row in df_socket_loaded.iterrows():
+            job_name = str(row.get("job_name", "") or "").strip()
+            if not job_name:
+                continue
+            jid = _sanitize_job_id(job_name)
+            rec: Dict[str, Any] = {"job_name": job_name, "job_id": jid, "pies": {}}
+            out_job_dir = job_pies_dir / jid
+            out_job_dir.mkdir(parents=True, exist_ok=True)
+
+            for s in sockets2:
+                vals: List[float] = []
+                labels: List[str] = []
+                for m in tma_top:
+                    col = f"{s}__{m}"
+                    if col not in df_socket_loaded.columns:
+                        continue
+                    try:
+                        v = pd.to_numeric(row.get(col), errors="coerce")
+                        try:
+                            if pd.isna(v):
+                                continue
+                        except Exception:
+                            if v != v:
+                                continue
+                        vals.append(float(v))
+                        labels.append(m.replace("metric_TMA_", "").replace("(%)", ""))
+                    except Exception:
+                        continue
+                if not vals:
+                    continue
+                fig, ax = plt.subplots(figsize=(4.8, 4.8))
+                ax.pie(
+                    vals,
+                    labels=labels,
+                    autopct=lambda pct: f"{pct:.1f}%" if pct > 3 else "",
+                    startangle=90,
+                    counterclock=False,
+                )
+                ax.set_title(f"{job_name} | {s} TMA top-level (%)")
+                fig.tight_layout()
+                out_png = out_job_dir / f"tma_pie_{s}.png"
+                fig.savefig(out_png, dpi=160)
+                plt.close(fig)
+                rel_png = out_png.relative_to(run_dir).as_posix()
+                rec["pies"][s] = rel_png
+
+            if rec.get("pies"):
+                manifest[job_name] = rec
+
+        try:
+            _write_text(out_dir / "emon_job_pies_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+
+        socket_cols = [c for c in df_socket_loaded.columns if c.startswith("socket_") and "__" in c]
+        sockets = sorted({c.split("__", 1)[0] for c in socket_cols})
+        for s in sockets:
+            vals: List[float] = []
+            labels: List[str] = []
+            for m in tma_top:
+                col = f"{s}__{m}"
+                if col not in df_socket_loaded.columns:
+                    continue
+                ser = pd.to_numeric(df_socket_loaded[col], errors="coerce").dropna()
+                if ser.empty:
+                    continue
+                labels.append(m.replace("metric_TMA_", "").replace("(%)", ""))
+                vals.append(float(ser.mean()))
+            if not vals:
+                continue
+            fig, ax = plt.subplots(figsize=(4.8, 4.8))
+            ax.pie(
+                vals,
+                labels=labels,
+                autopct=lambda pct: f"{pct:.1f}%" if pct > 3 else "",
+                startangle=90,
+                counterclock=False,
+            )
+            ax.set_title(f"{s} TMA top-level (%)")
+            fig.tight_layout()
+            fig.savefig(out_dir / f"emon_socket_tma_pie_{s}.png", dpi=160)
+            plt.close(fig)
+
+    # Per-run summary HTML (rendered by the web UI)
+    run_summary_metrics = list(DEFAULT_SOCKET_VIEW_METRICS)
+    try:
+        df_socket_for_summary = df_socket_loaded if df_socket_loaded is not None else pd.DataFrame([])
+    except Exception:
+        df_socket_for_summary = pd.DataFrame([])
+
+    summary_html = _render_run_summary_html(
+        run_dir=run_dir,
+        out_dir=out_dir,
+        df_jobs=df_jobs,
+        failed_variants=failed_variants,
+        df_socket=df_socket_for_summary,
+        wanted_metrics=run_summary_metrics,
+    )
+    _write_text(out_dir / "run_summary.html", summary_html)
 
     # ------------------------------------------------------------------
     # 4) Plots (matplotlib)
@@ -668,7 +1146,6 @@ def main() -> int:
             plt.close(fig)
 
     print(f"[ok] Wrote: {out_dir / 'summary_pivot.csv'}")
-    print(f"[ok] Wrote: {out_dir / 'emon_metrics.csv'}")
     print(f"[ok] Wrote: {out_dir / 'emon_socket_metrics.csv'}")
     print(f"[ok] Wrote: {out_dir / 'failed_variants.csv'}")
     for p in [
