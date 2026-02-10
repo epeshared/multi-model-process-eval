@@ -54,7 +54,7 @@ def _eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _try_import() -> Tuple[Any, Any]:
+def _try_import() -> Tuple[Any, Optional[Any]]:
     try:
         import pandas as pd  # type: ignore
     except Exception as e:
@@ -63,17 +63,18 @@ def _try_import() -> Tuple[Any, Any]:
         _eprint("Try: python -m pip install pandas")
         raise
 
+    plt = None
     try:
         import matplotlib  # type: ignore
 
         # Headless-safe backend (common on servers / SSH).
         matplotlib.use("Agg", force=True)  # type: ignore[attr-defined]
-        import matplotlib.pyplot as plt  # type: ignore
+        import matplotlib.pyplot as _plt  # type: ignore
+
+        plt = _plt
     except Exception as e:
-        _eprint("ERROR: matplotlib is required for plots")
+        _eprint("WARN: matplotlib not available; skipping plots")
         _eprint(f"Import error: {e}")
-        _eprint("Try: python -m pip install matplotlib")
-        raise
 
     return pd, plt
 
@@ -843,6 +844,7 @@ def main() -> int:
             if xlsx not in cache:
                 cache[xlsx] = _extract_socket_view_from_xlsx(pd=pd, xlsx_path=xlsx, wanted_metrics=socket_metrics)
             rec: Dict[str, Any] = {
+                "server_host": r.get("server_host", ""),
                 "variant": r.get("variant", ""),
                 "job_name": r.get("job_name", ""),
                 "resource_cpu": r.get("resource_cpu", ""),
@@ -878,7 +880,7 @@ def main() -> int:
     except Exception:
         df_socket_loaded = None
 
-    if df_socket_loaded is not None and not df_socket_loaded.empty:
+    if df_socket_loaded is not None and not df_socket_loaded.empty and plt is not None:
         # --------------------------------------------------------------
         # Per-job socket TMA pie charts (job page in web UI)
         # --------------------------------------------------------------
@@ -893,11 +895,12 @@ def main() -> int:
             sockets2 = []
 
         for _, row in df_socket_loaded.iterrows():
+            server_host = str(row.get("server_host", "") or "").strip()
             job_name = str(row.get("job_name", "") or "").strip()
             if not job_name:
                 continue
-            jid = _sanitize_job_id(job_name)
-            rec: Dict[str, Any] = {"job_name": job_name, "job_id": jid, "pies": {}}
+            jid = _sanitize_job_id(f"{server_host}__{job_name}" if server_host else job_name)
+            rec: Dict[str, Any] = {"server_host": server_host, "job_name": job_name, "job_id": jid, "pies": {}}
             out_job_dir = job_pies_dir / jid
             out_job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -939,7 +942,8 @@ def main() -> int:
                 rec["pies"][s] = rel_png
 
             if rec.get("pies"):
-                manifest[job_name] = rec
+                key = f"{server_host}::{job_name}" if server_host else job_name
+                manifest[key] = rec
 
         try:
             _write_text(out_dir / "emon_job_pies_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -997,7 +1001,7 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Scalability plots: focus on 4 dimensions.
     # We use df_mean (mean across repeats) to keep plots readable.
-    if not df_mean.empty:
+    if plt is not None and (not df_mean.empty):
         # Helper: plot lines by a categorical variable.
         def _plot_lines(
             *,

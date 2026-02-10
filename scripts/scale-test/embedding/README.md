@@ -81,6 +81,114 @@ When provided as lists, the runner executes the cartesian product:
 
 `cpu.cpus × sglang_max_total_tokens × batch_sizes × token_lens × repeats`
 
+## Multi-host (SSH dispatch)
+
+If you want to run the **same sweep on multiple servers** and copy the results back into the local
+`result_root`, add a server list under `run`:
+
+```json
+{
+	"run": {
+		"servers": [
+			{
+				"ip": "10.0.0.11",
+				"username": "ubuntu",
+				"password": "",
+				"remote_repo_dir": "/path/to/multi-model-process-eval",
+				"pre_requirements": [
+					{
+						"file": "scripts/scale-test/pre-requirements/install_miniforge3_linux_x86_64.sh",
+						"stage": "before_conda",
+						"mode": "bash"
+					},
+					{
+						"file": "scripts/scale-test/pre-requirements/install_sglang.sh",
+						"stage": "after_conda",
+						"mode": "bash"
+					}
+				],
+				"requirements_profile": "cpu",
+				"conda_env": "xtang-embedding-cpu",
+				"install_requirements": false,
+				"requirements_files": ["requirements.txt"],
+				"pip_extra_args": [],
+				"pre_setup_cmds": []
+			},
+			{
+				"ip": "10.0.0.12",
+				"username": "ubuntu",
+				"remote_repo_dir": "/path/to/multi-model-process-eval",
+				"requirements_profile": "cuda",
+				"remote_python": ["conda", "run", "-n", "xtang-embedding-cuda", "python"],
+				"install_requirements": true,
+				"requirements_files": ["requirements.txt", "requirements-mteb.txt"]
+			}
+		],
+
+		"remote_result_root": "/path/to/result/fix_token_len",
+		"install_requirements": false,
+		"requirements_profile": "cpu",
+		"requirements_files": [],
+		"pip_extra_args": [],
+
+		"ssh": {
+			"user": "", 
+			"port": 22,
+			"identity_file": "",
+			"options": []
+		}
+	}
+}
+```
+
+Backward compatibility:
+
+- You can still use `"servers": ["10.0.0.11", "10.0.0.12"]` with the global `run.remote_*` and `run.ssh` defaults.
+
+`remote_python` can be a list if you need an environment wrapper, e.g.
+
+- `"remote_python": ["conda", "run", "-n", "myenv", "python"]`
+
+If you set `password`, the dispatcher uses `sshpass` on the **local** machine for ssh/scp/rsync.
+Storing passwords in plain JSON is not recommended; prefer SSH keys.
+
+Then run as usual:
+
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
+
+Notes / assumptions:
+
+- Each server must be reachable via `ssh`.
+- Requires `scp` and `rsync` on the local machine.
+- If you set `password`, requires `sshpass` on the local machine (non-interactive).
+- If you omit `password`, ssh/scp/rsync may prompt interactively in your terminal when needed.
+- `remote_repo_dir` must exist on each remote host and contain this repo (so relative paths in the config still work).
+- The remote run directory is `<remote_result_root>/<scale_id>/`.
+
+Pre-requirements (optional):
+
+- Prefer `pre_requirements` (a list) for multi-step bootstrap.
+
+Stages:
+
+- `before_conda`: runs before any `conda activate`.
+- `after_conda`: runs after `eval "$(conda shell.bash hook)"; conda activate <conda_env>;` in the **same remote shell**.
+
+Modes:
+
+- `mode: "bash"` runs `bash <file>`.
+- `mode: "source"` runs `. <file>` (useful if the script must `export` env vars for later commands).
+
+Legacy compatibility:
+
+- `pre_requirements_file` + `pre_requirements_use_conda_env` are still accepted.
+
+Outputs:
+
+- Local root: `<result_root>/<scale_id>/`
+- Per-host copy: `<result_root>/<scale_id>/hosts/<host>/...`
+- Combined aggregate: `<result_root>/<scale_id>/aggregate.csv` with an extra `server_host` column.
+
 ## Notes on CPU/memory limiting
 
 The runner tries to constrain the entire auto-test process tree (runner + servers + benchmark):

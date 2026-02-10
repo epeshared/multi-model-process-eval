@@ -26,6 +26,90 @@ import urllib.parse
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _parse_cpu_list_expr(expr: str) -> List[int]:
+    s = (expr or "").strip()
+    if not s:
+        return []
+    out: List[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                lo = int(a.strip())
+                hi = int(b.strip())
+            except Exception:
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            out.extend(range(lo, hi + 1))
+        else:
+            try:
+                out.append(int(part))
+            except Exception:
+                continue
+    return sorted(set(out))
+
+
+def _read_self_status_fields() -> Dict[str, str]:
+    try:
+        p = Path("/proc/self/status")
+        if not p.exists():
+            return {}
+        fields: Dict[str, str] = {}
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("Cpus_allowed_list:") or line.startswith("Mems_allowed_list:") or line.startswith("Cpus_allowed:"):
+                k, v = line.split(":", 1)
+                fields[k.strip()] = v.strip()
+        return fields
+    except Exception:
+        return {}
+
+
+def _apply_self_affinity_from_env(*, tee: bool) -> None:
+    expr = str(os.environ.get("AUTO_TEST_CPU_EXPR") or "").strip()
+    if not expr:
+        return
+
+    before = _read_self_status_fields()
+    cpus = _parse_cpu_list_expr(expr)
+    if not cpus:
+        print(f"[affinity] AUTO_TEST_CPU_EXPR set but unparsable: {expr}")
+        return
+
+    try:
+        os.sched_setaffinity(0, set(cpus))
+    except Exception as e:
+        print(f"[affinity] failed to apply AUTO_TEST_CPU_EXPR={expr}: {e}")
+        return
+
+    after = _read_self_status_fields()
+    # Always print one evidence line so remote logs show binding.
+    print(
+        "[affinity] applied "
+        + f"AUTO_TEST_CPU_EXPR={expr} "
+        + f"before={before.get('Cpus_allowed_list', '?')} "
+        + f"after={after.get('Cpus_allowed_list', '?')}"
+    )
+
+    if tee and shutil.which("taskset"):
+        try:
+            p = subprocess.run(
+                ["taskset", "-pc", str(os.getpid())],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            out = (p.stdout or "").strip()
+            if out:
+                print(f"[affinity] {out}")
+        except Exception:
+            pass
+
+
 @dataclass(frozen=True)
 class Job:
     name: str
@@ -451,6 +535,97 @@ def _list_listening_pids(port: int) -> List[int]:
     return uniq
 
 
+def _print_pid_affinity_debug(*, pid: int, prefix: str) -> None:
+    """Print best-effort CPU pinning evidence for a given pid."""
+
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "pid,ppid,etime,%cpu,psr,nlwp,cmd"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        out = (proc.stdout or "").strip()
+        if out:
+            for line in out.splitlines():
+                print(prefix + line)
+    except Exception:
+        pass
+
+    taskset_bin = shutil.which("taskset")
+    if taskset_bin:
+        try:
+            proc = subprocess.run(
+                [taskset_bin, "-pc", str(int(pid))],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=2.0,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if out:
+                print(prefix + out)
+        except Exception:
+            pass
+
+    try:
+        status_path = Path(f"/proc/{int(pid)}/status")
+        if status_path.exists():
+            text = status_path.read_text(encoding="utf-8", errors="replace")
+            for line in text.splitlines():
+                if line.startswith("Cpus_allowed_list:") or line.startswith("Mems_allowed_list:"):
+                    print(prefix + line)
+    except Exception:
+        pass
+
+    try:
+        cgroup_path = Path(f"/proc/{int(pid)}/cgroup")
+        if cgroup_path.exists():
+            cg = cgroup_path.read_text(encoding="utf-8", errors="replace").strip()
+            if cg:
+                # Usually one line on cgroup v2: "0::/path"
+                print(prefix + "cgroup=" + cg.splitlines()[0])
+    except Exception:
+        pass
+
+
+def _print_server_pid_debug(*, base_url: str, backend: str, proc: Optional[subprocess.Popen[str]]) -> None:
+    """Print server PID + pinning evidence after server is ready."""
+
+    base_url = _norm_base_url(base_url)
+    if not base_url:
+        return
+
+    pids: List[int] = []
+    if proc is not None and getattr(proc, "pid", None):
+        try:
+            pids = [int(proc.pid)]
+        except Exception:
+            pids = []
+    else:
+        # External server: try to resolve PID by local listening port.
+        try:
+            host, port = _parse_host_port(base_url)
+            if host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"} and port > 0:
+                pids = _list_listening_pids(port)
+        except Exception:
+            pids = []
+
+    if not pids:
+        print(f"[server:{backend}] pid_debug: unable to resolve server pid for {base_url}")
+        return
+
+    # Keep output short if multiple PIDs are present.
+    show = pids[:3]
+    more = len(pids) - len(show)
+    print(f"[server:{backend}] pid_debug: base_url={base_url} pids={show}{' (+%d more)' % more if more > 0 else ''}")
+    for pid in show:
+        _print_pid_affinity_debug(pid=pid, prefix=f"[server:{backend}] ")
+
+
 def _try_shutdown_existing_listener(*, base_url: str, tee: bool) -> bool:
     """Best-effort shutdown of any local process listening on base_url's port.
 
@@ -732,6 +907,10 @@ def _ensure_server(
 
         if tee:
             print(f"[server:{spec.backend}] already running at {base_url} (external); will not start")
+
+        # Hook: print CPU pinning evidence for the external server too.
+        _print_server_pid_debug(base_url=base_url, backend=spec.backend, proc=None)
+
         rs = RunningServer(
             spec=spec,
             base_url=base_url,
@@ -912,6 +1091,10 @@ def _ensure_server(
         numactl_cpunodebind=eff_cpunodebind,
         numactl_membind=eff_membind,
     )
+
+    # Hook: after server is ready, print pid + affinity/cpuset evidence.
+    _print_server_pid_debug(base_url=base_url, backend=spec.backend, proc=proc)
+
     running[key] = rs
     return rs
 
@@ -1454,6 +1637,11 @@ def main() -> int:
         help="Re-parse existing logs/metrics for a prior run_id and rewrite summary_<run_id>.jsonl/.csv",
     )
     args = ap.parse_args()
+
+    # If the scale-test wrapper provided a CPU list, enforce it here as well.
+    # This makes CPU pinning resilient even when systemd-run properties are
+    # accepted but not enforced by the host.
+    _apply_self_affinity_from_env(tee=bool(args.tee))
 
     cfg_path = Path(args.config)
     cfg = _load_json(cfg_path)

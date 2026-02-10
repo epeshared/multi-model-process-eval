@@ -810,6 +810,7 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
         )
 
     title = f"{run.ref.task} / {run.ref.suite} / {run.ref.run_id}"
+    server_info_href = f"/server-info/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}"
     body = f"""
 <section class="card">
   <div class="breadcrumbs">
@@ -826,6 +827,7 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
   <div class="sub">mtime: <span class="mono">{_e(_fmt_dt(run.mtime))}</span></div>
   <div class="sub">run_dir: <span class="mono">{_e(run.run_dir)}</span></div>
   <div class="sub">analysis_dir: <span class="mono">{_e(run.analysis_dir)}</span></div>
+    <div class="sub">server info: <a href="{server_info_href}">View</a></div>
 </section>
 
 <section class="card">
@@ -841,6 +843,141 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
       {''.join(csv_rows) if csv_rows else '<tr><td colspan="3" class="muted">No CSVs found.</td></tr>'}
     </tbody>
   </table>
+</section>
+"""
+    return _html_page(title, body)
+
+
+def _list_server_info_hosts(run: RunInfo) -> List[Dict[str, str]]:
+    """Return list of host entries with tags and label.
+
+    Each entry: {"tag": "...", "label": "...", "base_rel": "..."}
+    where base_rel is relative to run.run_dir.
+    """
+
+    out: List[Dict[str, str]] = []
+
+    # Local single-host run: <run>/server_info/
+    local_info = (run.run_dir / "server_info").resolve()
+    if _is_within(local_info, run.run_dir) and local_info.exists() and local_info.is_dir():
+        out.append({"tag": "local", "label": "local", "base_rel": "server_info"})
+
+    # Multi-host: <run>/hosts/<host_tag>/server_info/
+    hosts_dir = (run.run_dir / "hosts").resolve()
+    if _is_within(hosts_dir, run.run_dir) and hosts_dir.exists() and hosts_dir.is_dir():
+        try:
+            for child in sorted(hosts_dir.iterdir(), key=lambda p: p.name):
+                if not child.is_dir():
+                    continue
+                info_dir = (child / "server_info").resolve()
+                if not _is_within(info_dir, run.run_dir) or not info_dir.exists() or not info_dir.is_dir():
+                    continue
+                label = child.name
+                host_txt = (child / "server_host.txt").resolve()
+                if _is_within(host_txt, run.run_dir) and host_txt.exists() and host_txt.is_file():
+                    try:
+                        label2 = _read_text(host_txt, max_bytes=4096).strip()
+                        if label2:
+                            label = label2
+                    except Exception:
+                        pass
+                out.append({"tag": child.name, "label": label, "base_rel": f"hosts/{child.name}/server_info"})
+        except Exception:
+            pass
+
+    # De-dup by tag
+    seen: set[str] = set()
+    uniq: List[Dict[str, str]] = []
+    for it in out:
+        t = str(it.get("tag") or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        uniq.append(it)
+    return uniq
+
+
+def _render_server_info(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]], host_tag: str = "") -> str:
+    hosts = _list_server_info_hosts(run)
+    chosen = str(host_tag or "").strip()
+    if not chosen:
+        chosen = (q.get("host") or [""])[0].strip()
+
+    # Default: first host entry
+    if not chosen and hosts:
+        chosen = str(hosts[0].get("tag") or "")
+
+    chosen_entry: Optional[Dict[str, str]] = None
+    for it in hosts:
+        if str(it.get("tag") or "") == chosen:
+            chosen_entry = it
+            break
+
+    # Breadcrumbs
+    title = f"{run.ref.task} / {run.ref.suite} / {run.ref.run_id} / server info"
+    run_href = f"/run/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}"
+
+    # Host list table
+    rows: List[str] = []
+    for it in hosts:
+        tag = str(it.get("tag") or "")
+        label = str(it.get("label") or tag)
+        base_rel = str(it.get("base_rel") or "")
+        lscpu_rel = f"{base_rel}/lscpu.txt"
+        lscpuj_rel = f"{base_rel}/lscpu.json"
+
+        view = f"/server-info/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(tag)}"
+        dl_txt = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(lscpu_rel)}"
+        dl_json = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(lscpuj_rel)}"
+        rows.append(
+            "<tr>"
+            f"<td class=\"mono\">{_e(tag)}</td>"
+            f"<td class=\"mono\">{_e(label)}</td>"
+            f"<td><a href=\"{view}\">View</a></td>"
+            f"<td><a href=\"{dl_txt}\" target=\"_blank\">lscpu.txt</a></td>"
+            f"<td><a href=\"{dl_json}\" target=\"_blank\">lscpu.json</a></td>"
+            "</tr>"
+        )
+
+    host_table = (
+        "<table class=\"table\">"
+        "<thead><tr><th>tag</th><th>label</th><th>page</th><th>download</th><th>download</th></tr></thead>"
+        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=\"5\" class=\"muted\">No server_info found.</td></tr>'}</tbody>"
+        "</table>"
+    )
+
+    # Content preview
+    preview_html = "<div class=\"muted\">Select a host to view lscpu output.</div>"
+    if chosen_entry is not None:
+        base_rel = str(chosen_entry.get("base_rel") or "")
+        lscpu_txt = (run.run_dir / base_rel / "lscpu.txt").resolve()
+        if _is_within(lscpu_txt, run.run_dir) and lscpu_txt.exists() and lscpu_txt.is_file():
+            txt = _read_text(lscpu_txt, max_bytes=2_000_000)
+            preview_html = f"<pre class=\"mono\" style=\"white-space: pre-wrap\">{_e(txt)}</pre>"
+        else:
+            preview_html = f"<div class=\"warn mono\">Missing: {_e(str(lscpu_txt))}</div>"
+
+    body = f"""
+<section class="card">
+  <div class="breadcrumbs">
+    <a href="/">Home</a>
+    <span class="sep">/</span>
+    <a href="{run_href}">Run</a>
+    <span class="sep">/</span>
+    <span class="mono">server info</span>
+  </div>
+  <h1>{_e(title)}</h1>
+  <div class="sub">run_dir: <span class="mono">{_e(run.run_dir)}</span></div>
+</section>
+
+<section class="card">
+  <h2>Hosts</h2>
+  {host_table}
+</section>
+
+<section class="card">
+  <h2>lscpu</h2>
+  {preview_html}
 </section>
 """
     return _html_page(title, body)
@@ -1024,7 +1161,7 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
     return _html_page(title, body)
 
 
-def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Dict[str, List[str]]) -> str:
+def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Dict[str, List[str]], server_host: str = "") -> str:
     # Ensure analysis artifacts exist.
     required = [run.analysis_dir / "emon_socket_metrics.csv", run.analysis_dir / "emon_job_pies_manifest.json"]
     _maybe_autogen_analysis(scale_test_root=scale_test_root, run=run, required=required)
@@ -1037,10 +1174,15 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
     text = _read_text(csv_path, max_bytes=20_000_000)
     reader = csv.DictReader(io.StringIO(text))
     row: Optional[Dict[str, str]] = None
+    want_host = str(server_host or "").strip()
     for r in reader:
-        if (r.get("job_name") or "").strip() == job_name:
-            row = {k: ("" if v is None else str(v)) for k, v in r.items()}
-            break
+        if (r.get("job_name") or "").strip() != job_name:
+            continue
+        if want_host:
+            if (r.get("server_host") or "").strip() != want_host:
+                continue
+        row = {k: ("" if v is None else str(v)) for k, v in r.items()}
+        break
 
     back_run = f"/run/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}"
     back_csv = f"/csv/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/emon_socket_metrics.csv"
@@ -1077,7 +1219,8 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
 
     pies: Dict[str, str] = {}
     try:
-        rec = manifest.get(job_name) or {}
+        key = f"{want_host}::{job_name}" if want_host else job_name
+        rec = manifest.get(key) or manifest.get(job_name) or {}
         pies = rec.get("pies") or {}
     except Exception:
         pies = {}
@@ -1205,6 +1348,7 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
     )
 
     title = f"{run.ref.task} / {run.ref.suite} / {run.ref.run_id} :: job {job_name}"
+    host_line = f" • host: <span class=\"mono\">{_e(want_host)}</span>" if want_host else ""
     body = f"""
 <section class="card">
   <div class="breadcrumbs">
@@ -1217,7 +1361,7 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
     <span class="mono">{_e(job_name)}</span>
   </div>
   <h1>Job</h1>
-  <div class="sub">job_name: <span class="mono">{_e(job_name)}</span></div>
+    <div class="sub">job_name: <span class="mono">{_e(job_name)}</span>{host_line}</div>
   <div class="toolbar">{xlsx_dl}</div>
   {meta_table}
 </section>
@@ -1274,7 +1418,10 @@ def _render_csv_preview(path: Path, max_rows: int = 200, *, run: Optional[RunInf
             except Exception:
                 return None
 
-        def _job_href(job_name: str) -> str:
+        def _job_href(job_name: str, server_host: str) -> str:
+            sh = (server_host or "").strip()
+            if sh:
+                return f"/job/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{quote(sh)}/{quote(job_name)}"
             return f"/job/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{quote(job_name)}"
 
         thead = "<tr>" + "".join(_td_text(c, is_head=True) for c in fieldnames) + "</tr>"
@@ -1282,12 +1429,13 @@ def _render_csv_preview(path: Path, max_rows: int = 200, *, run: Optional[RunInf
         for r in rows:
             tds: List[str] = []
             job = r.get("job_name", "")
+            sh = r.get("server_host", "")
             emon_xlsx = r.get("emon_summary_xlsx", "")
             href = _summary_href(emon_xlsx, job)
             for c in fieldnames:
                 v = r.get(c, "")
                 if c == "job_name" and job:
-                    tds.append(_td_html(f'<a href="{_job_href(job)}">{_e(job)}</a>', cls="mono"))
+                    tds.append(_td_html(f'<a href="{_job_href(job, sh)}">{_e(job)}</a>', cls="mono"))
                 elif c == "emon_summary_xlsx" and href:
                     tds.append(_td_html(f'<a href="{href}" target="_blank">summary.xlsx</a>', cls="mono"))
                 else:
@@ -1381,6 +1529,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html_text, content_type="text/html; charset=utf-8")
             return
 
+        if path.startswith("/server-info/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) not in {4, 5}:
+                self._send(404, "Not Found\n", content_type="text/plain")
+                return
+            host_tag = ""
+            if len(parts) == 4:
+                _, task, suite, run_id = parts
+            else:
+                _, task, suite, run_id, host_tag = parts
+            run = srv.get_run(task, suite, run_id)
+            if run is None:
+                self._send(404, "Run not found\n", content_type="text/plain")
+                return
+            html_text = _render_server_info(srv.scale_test_root, run, q, host_tag=host_tag)
+            self._send(200, html_text, content_type="text/html; charset=utf-8")
+            return
+
         if path.startswith("/csv/"):
             parts = [p for p in path.split("/") if p]
             if len(parts) != 5:
@@ -1397,15 +1563,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/job/"):
             parts = [p for p in path.split("/") if p]
-            if len(parts) != 5:
+            if len(parts) not in {5, 6}:
                 self._send(404, "Not Found\n", content_type="text/plain")
                 return
-            _, task, suite, run_id, job_name = parts
+            server_host = ""
+            if len(parts) == 5:
+                _, task, suite, run_id, job_name = parts
+            else:
+                _, task, suite, run_id, server_host, job_name = parts
             run = srv.get_run(task, suite, run_id)
             if run is None:
                 self._send(404, "Run not found\n", content_type="text/plain")
                 return
-            html_text = _render_job_detail(srv.scale_test_root, run, job_name, q)
+            html_text = _render_job_detail(srv.scale_test_root, run, job_name, q, server_host=server_host)
             self._send(200, html_text, content_type="text/html; charset=utf-8")
             return
 

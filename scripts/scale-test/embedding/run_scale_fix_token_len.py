@@ -4,14 +4,18 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -129,6 +133,14 @@ def _try_systemd_scope_cmd(
     if not systemd_run:
         return None
 
+    # Some environments accept systemd-run properties but do not actually
+    # enforce cpuset constraints (especially with --user scopes). As an extra
+    # guardrail, apply an explicit affinity mask via taskset *inside* the scope.
+    cmd2 = list(cmd)
+    taskset_bin = _which("taskset")
+    if (cpu_expr or "").strip() and taskset_bin:
+        cmd2 = [taskset_bin, "-c", cpu_expr.strip()] + cmd2
+
     props: List[str] = []
     if (cpu_expr or "").strip():
         # For transient scope units, systemd commonly supports AllowedCPUs= (cpuset).
@@ -146,7 +158,7 @@ def _try_systemd_scope_cmd(
             check=False,
         )
         if test.returncode == 0:
-            return [systemd_run, "--user", "--scope"] + props + ["--"] + cmd
+            return [systemd_run, "--user", "--scope"] + props + ["--"] + cmd2
     except Exception:
         pass
 
@@ -159,7 +171,7 @@ def _try_systemd_scope_cmd(
             check=False,
         )
         if test.returncode == 0:
-            return [systemd_run, "--scope"] + props + ["--"] + cmd
+            return [systemd_run, "--scope"] + props + ["--"] + cmd2
     except Exception:
         pass
 
@@ -203,6 +215,46 @@ def _safe_name(s: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in (s or "").strip())
 
 
+def _parse_bool(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
+    s = str(x or "").strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off", ""):
+        return False
+    raise SystemExit(f"invalid boolean value: {x}")
+
+
+def _validate_remote_repo_dir_for_delete(remote_repo_dir: str) -> str:
+    """Defensive validation for destructive operations on remote paths."""
+    p = str(remote_repo_dir or "").strip()
+    if not p:
+        raise SystemExit("refusing to delete empty remote_repo_dir")
+    if not p.startswith("/"):
+        raise SystemExit(f"refusing to delete non-absolute remote_repo_dir: {p}")
+    norm = os.path.normpath(p)
+    # Refuse obvious dangerous paths.
+    forbidden = {
+        "/",
+        "/home",
+        "/root",
+        "/tmp",
+        "/var",
+        "/usr",
+        "/opt",
+        "/mnt",
+        "/media",
+    }
+    if norm in forbidden:
+        raise SystemExit(f"refusing to delete dangerous remote_repo_dir: {norm}")
+    # Require at least /a/b/c (three components) to reduce foot-guns.
+    parts = [x for x in norm.split("/") if x]
+    if len(parts) < 3:
+        raise SystemExit(f"refusing to delete shallow remote_repo_dir: {norm}")
+    return norm
+
+
 def _as_str_list(x: Any) -> List[str]:
     if x is None:
         return []
@@ -210,6 +262,39 @@ def _as_str_list(x: Any) -> List[str]:
         return [str(v).strip() for v in x if str(v).strip()]
     s = str(x).strip()
     return [s] if s else []
+
+
+@dataclass(frozen=True)
+class PreRequirement:
+    file: str
+    stage: str  # before_conda | after_conda
+    mode: str  # bash | source
+    source_bashrc_after: bool
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    host: str
+    user: str
+    password: str
+    port: Optional[int]
+    identity_file: str
+    ssh_options: List[str]
+    remote_repo_dir: str
+    remote_result_root: Optional[str]
+    remote_python: str
+    conda_env: str
+    install_requirements: bool
+    requirements_profile: str
+    requirements_files: List[str]
+    pip_extra_args: List[str]
+    pre_setup_cmds: List[str]
+    pre_requirements: List[PreRequirement]
+
+
+@dataclass(frozen=True)
+class SSHDispatchConfig:
+    servers: List[ServerConfig]
 
 
 @dataclass(frozen=True)
@@ -228,6 +313,7 @@ class ScaleConfig:
     emon_process_after_run: bool
     emon_process_cmd: List[str]
     emon_expected_output: str
+    dispatch: SSHDispatchConfig
 
 
 def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
@@ -300,6 +386,205 @@ def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
         raise SystemExit("config.emon.process_cmd must be a string list")
     expected_output = str(emon.get("expected_output") or "summary.xlsx")
 
+    # Optional: multi-host dispatch via SSH (run the sweep on each server and copy back).
+    ssh = run.get("ssh") or {}
+    if not isinstance(ssh, dict):
+        ssh = {}
+    ssh_user_default = str(ssh.get("user") or ssh.get("username") or "").strip()
+
+    ssh_port_default: Optional[int] = None
+    ssh_port_raw = ssh.get("port")
+    if ssh_port_raw is not None and str(ssh_port_raw).strip() != "":
+        try:
+            ssh_port_default = int(ssh_port_raw)
+        except Exception:
+            ssh_port_default = None
+
+    ssh_identity_file_default = str(ssh.get("identity_file") or "").strip()
+    ssh_options_default = _as_str_list(ssh.get("options"))
+
+    remote_repo_dir_default = str(run.get("remote_repo_dir") or str(REPO_ROOT)).strip()
+    remote_result_root_default = str(run.get("remote_result_root") or "").strip() or None
+
+    install_requirements_default = bool(run.get("install_requirements") or False)
+    requirements_profile_default = str(run.get("requirements_profile") or run.get("profile") or "").strip().lower()
+    requirements_files_default = _as_str_list(run.get("requirements_files"))
+    pip_extra_args_default = _as_str_list(run.get("pip_extra_args"))
+    pre_requirements_file_default = str(run.get("pre_requirements_file") or "").strip()
+
+    def _parse_pre_requirements_from_obj(obj: Any) -> List[PreRequirement]:
+        out: List[PreRequirement] = []
+        if obj is None:
+            return out
+        if isinstance(obj, list):
+            for it in obj:
+                if isinstance(it, str):
+                    s = it.strip()
+                    if not s:
+                        continue
+                    out.append(PreRequirement(file=s, stage="before_conda", mode="bash", source_bashrc_after=False))
+                elif isinstance(it, dict):
+                    f = str(it.get("file") or it.get("path") or "").strip()
+                    if not f:
+                        continue
+                    stage = str(it.get("stage") or "before_conda").strip().lower()
+                    if stage not in {"before_conda", "after_conda"}:
+                        stage = "before_conda"
+                    mode = str(it.get("mode") or "bash").strip().lower()
+                    if mode not in {"bash", "source"}:
+                        mode = "bash"
+                    sb = bool(it.get("source_bashrc_after") or False)
+                    out.append(PreRequirement(file=f, stage=stage, mode=mode, source_bashrc_after=sb))
+        return out
+
+    def _parse_pre_requirements_legacy(item: Dict[str, Any]) -> List[PreRequirement]:
+        # Legacy:
+        # - pre_requirements_file
+        # - pre_requirements_use_conda_env
+        f = str(item.get("pre_requirements_file") or item.get("pre_requirements") or "").strip()
+        if not f:
+            return []
+        use_conda = bool(item.get("pre_requirements_use_conda_env") or False)
+        if use_conda:
+            return [PreRequirement(file=f, stage="after_conda", mode="bash", source_bashrc_after=False)]
+        # Preserve historical behavior (source) for before-conda.
+        return [PreRequirement(file=f, stage="before_conda", mode="source", source_bashrc_after=False)]
+
+    def _remote_python_cmd(remote_python_raw: Any, conda_env: str) -> str:
+        if isinstance(remote_python_raw, list):
+            parts = [str(x).strip() for x in remote_python_raw if str(x).strip()]
+            return " ".join(shlex.quote(p) for p in parts) if parts else "python3"
+        s = str(remote_python_raw or "").strip()
+        if s:
+            return s
+        if str(conda_env or "").strip():
+            parts = ["conda", "run", "-n", str(conda_env).strip(), "python"]
+            return " ".join(shlex.quote(p) for p in parts)
+        return "python3"
+
+    remote_python_default = _remote_python_cmd(run.get("remote_python"), conda_env="")
+
+    servers_raw = run.get("servers")
+    server_specs: List[ServerConfig] = []
+    if isinstance(servers_raw, list):
+        for item in servers_raw:
+            if isinstance(item, str):
+                host = str(item).strip()
+                if not host:
+                    continue
+                server_specs.append(
+                    ServerConfig(
+                        host=host,
+                        user=ssh_user_default,
+                        password="",
+                        port=ssh_port_default,
+                        identity_file=ssh_identity_file_default,
+                        ssh_options=list(ssh_options_default),
+                        remote_repo_dir=remote_repo_dir_default,
+                        remote_result_root=remote_result_root_default,
+                        remote_python=remote_python_default,
+                        conda_env="",
+                        install_requirements=install_requirements_default,
+                        requirements_profile=requirements_profile_default,
+                        requirements_files=list(requirements_files_default),
+                        pip_extra_args=list(pip_extra_args_default),
+                        pre_setup_cmds=[],
+                        pre_requirements=(
+                            [PreRequirement(file=pre_requirements_file_default, stage="before_conda", mode="source", source_bashrc_after=False)]
+                            if pre_requirements_file_default
+                            else []
+                        ),
+                    )
+                )
+            elif isinstance(item, dict):
+                host = str(item.get("ip") or item.get("host") or "").strip()
+                if not host:
+                    continue
+                user = str(item.get("username") or item.get("user") or ssh_user_default or "").strip()
+                password = str(item.get("password") or "").strip()
+
+                port: Optional[int] = ssh_port_default
+                port_raw = item.get("port")
+                if port_raw is not None and str(port_raw).strip() != "":
+                    try:
+                        port = int(port_raw)
+                    except Exception:
+                        port = ssh_port_default
+
+                identity_file = str(item.get("identity_file") or ssh_identity_file_default or "").strip()
+                ssh_options = _as_str_list(item.get("ssh_options"))
+                if not ssh_options:
+                    ssh_options = list(ssh_options_default)
+
+                remote_repo_dir = str(item.get("remote_repo_dir") or remote_repo_dir_default or str(REPO_ROOT)).strip()
+                remote_result_root = str(item.get("remote_result_root") or "").strip() or remote_result_root_default
+
+                conda_env = str(item.get("conda_env") or item.get("conda") or "").strip()
+                remote_python = _remote_python_cmd(item.get("remote_python", run.get("remote_python")), conda_env=conda_env)
+
+                install_requirements = bool(
+                    item.get("install_requirements")
+                    if ("install_requirements" in item)
+                    else install_requirements_default
+                )
+                requirements_profile = str(
+                    item.get("requirements_profile")
+                    or item.get("profile")
+                    or item.get("kind")
+                    or requirements_profile_default
+                    or ""
+                ).strip().lower()
+
+                requirements_files = _as_str_list(item.get("requirements_files"))
+                if not requirements_files:
+                    requirements_files = list(requirements_files_default)
+
+                pip_extra_args = _as_str_list(item.get("pip_extra_args"))
+                if not pip_extra_args:
+                    pip_extra_args = list(pip_extra_args_default)
+
+                pre_setup_cmds = _as_str_list(item.get("pre_setup_cmds") or item.get("setup_cmds"))
+
+                pre_reqs: List[PreRequirement] = []
+                # New format: explicit list
+                pre_reqs += _parse_pre_requirements_from_obj(item.get("pre_requirements"))
+                # New format: split lists
+                for f in _as_str_list(item.get("pre_requirements_before_conda")):
+                    pre_reqs.append(PreRequirement(file=f, stage="before_conda", mode="bash", source_bashrc_after=False))
+                for f in _as_str_list(item.get("pre_requirements_after_conda")):
+                    pre_reqs.append(PreRequirement(file=f, stage="after_conda", mode="bash", source_bashrc_after=False))
+                # Legacy fallback
+                if not pre_reqs:
+                    pre_reqs += _parse_pre_requirements_legacy(item)
+                # Global default legacy fallback
+                if not pre_reqs and pre_requirements_file_default:
+                    pre_reqs.append(
+                        PreRequirement(file=pre_requirements_file_default, stage="before_conda", mode="source", source_bashrc_after=False)
+                    )
+
+                server_specs.append(
+                    ServerConfig(
+                        host=host,
+                        user=user,
+                        password=password,
+                        port=port,
+                        identity_file=identity_file,
+                        ssh_options=list(ssh_options),
+                        remote_repo_dir=remote_repo_dir,
+                        remote_result_root=remote_result_root,
+                        remote_python=remote_python,
+                        conda_env=conda_env,
+                        install_requirements=install_requirements,
+                        requirements_profile=requirements_profile,
+                        requirements_files=list(requirements_files),
+                        pip_extra_args=list(pip_extra_args),
+                        pre_setup_cmds=list(pre_setup_cmds),
+                        pre_requirements=list(pre_reqs),
+                    )
+                )
+
+    dispatch = SSHDispatchConfig(servers=server_specs)
+
     return ScaleConfig(
         template_auto_test_config=template,
         result_root=result_root,
@@ -315,7 +600,861 @@ def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
         emon_process_after_run=emon_process_after_run,
         emon_process_cmd=[str(x) for x in process_cmd],
         emon_expected_output=expected_output,
+        dispatch=dispatch,
     )
+
+
+def _ssh_host_target(host: str, user: str) -> str:
+    h = str(host or "").strip()
+    if not h:
+        return h
+    if "@" in h or not user:
+        return h
+    return f"{user}@{h}"
+
+
+def _ssh_base_args(server: ServerConfig) -> List[str]:
+    # Allow interactive prompting when password is not provided.
+    # This also allows prompting for key passphrases when needed.
+    args: List[str] = ["-o", "BatchMode=no", "-o", "StrictHostKeyChecking=accept-new"]
+    if server.port:
+        args += ["-p", str(int(server.port))]
+    if server.identity_file:
+        args += ["-i", server.identity_file]
+    for opt in server.ssh_options or []:
+        s = str(opt).strip()
+        if not s:
+            continue
+        if s.startswith("-"):
+            args += s.split()
+        else:
+            args += ["-o", s]
+    return args
+
+
+def _scp_base_args(server: ServerConfig) -> List[str]:
+    # scp uses -P for port (ssh uses -p). It also supports -o options.
+    args: List[str] = ["-o", "BatchMode=no", "-o", "StrictHostKeyChecking=accept-new"]
+    if server.port:
+        args += ["-P", str(int(server.port))]
+    if server.identity_file:
+        args += ["-i", server.identity_file]
+    for opt in server.ssh_options or []:
+        s = str(opt).strip()
+        if not s:
+            continue
+        if s.startswith("-"):
+            # Best-effort: only keep '-o ...' style flags.
+            parts = s.split()
+            if parts and parts[0] == "-o" and len(parts) >= 2:
+                args += ["-o", " ".join(parts[1:])]
+        else:
+            args += ["-o", s]
+    return args
+
+
+def _rsync_ssh_command(server: ServerConfig) -> str:
+    parts: List[str] = []
+    if server.password:
+        parts += ["sshpass", "-p", server.password]
+    parts += ["ssh"] + _ssh_base_args(server)
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+def _log_meta_header(*, cmd_for_log: str, rc: int) -> str:
+    ts = dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"[meta] utc={ts} rc={int(rc)}\n[meta] cmd={cmd_for_log}\n"
+
+
+def _maybe_sshpass_prefix(server: ServerConfig) -> List[str]:
+    if not server.password:
+        return []
+    return ["sshpass", "-p", server.password]
+
+
+def _ssh_bash_lc_remote(cmd: str) -> str:
+    """Build a remote command string for ssh that safely runs a bash -lc command.
+
+    Note: ssh does not preserve argv boundaries for the remote side; it concatenates
+    the provided arguments into a single command string. Therefore, we must pass
+    a *single* remote command string that properly quotes the inner command.
+    """
+
+    return f"bash -lc {shlex.quote(str(cmd))}"
+
+
+def _dispatch_subprocess_env() -> Dict[str, str]:
+    """Return an env suitable for calling system ssh/scp/rsync.
+
+    Users often run this tool from inside a conda env that sets LD_LIBRARY_PATH
+    to conda-provided OpenSSL libs. That can break system binaries like ssh/scp
+    with errors like "OpenSSL version mismatch".
+
+    We only sanitize env for the dispatch subprocesses (ssh/scp/rsync). The
+    actual benchmark/python execution is remote and unaffected.
+    """
+
+    env = dict(os.environ)
+    # Common offenders.
+    for k in [
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        "CONDA_SHLVL",
+        "CONDA_PROMPT_MODIFIER",
+        "_CONDA_EXE",
+        "_CE_CONDA",
+        "_CE_M",
+    ]:
+        env.pop(k, None)
+    return env
+
+
+def _requirements_profile_default_file(profile: str) -> str:
+    p = str(profile or "").strip().lower()
+    if p in {"cpu", "host", "x86"}:
+        return "requirements-cpu.txt"
+    if p in {"cuda", "gpu"}:
+        return "requirements-cuda.txt"
+    return ""
+
+
+def _port_from_base_url(job_template: Dict[str, Any]) -> Optional[int]:
+    """Extract port from job_template base_url/openai_base_url, best-effort."""
+
+    if not isinstance(job_template, dict):
+        return None
+    raw = (
+        job_template.get("base_url")
+        or job_template.get("openai_base_url")
+        or job_template.get("api_base")
+        or ""
+    )
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    try:
+        u = urlparse(s)
+        if u.port:
+            return int(u.port)
+    except Exception:
+        pass
+    # Fallback: handle forms like "127.0.0.1:30000".
+    try:
+        if ":" in s and "//" not in s:
+            host, port_s = s.rsplit(":", 1)
+            if host and port_s.isdigit():
+                return int(port_s)
+    except Exception:
+        pass
+    return None
+
+
+def _sha256_hex(data: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+
+def _resolve_repo_path(p: str) -> Path:
+    pp = Path(str(p)).expanduser()
+    if pp.is_absolute():
+        return pp
+    return (REPO_ROOT / pp).resolve()
+
+
+def _compute_requirements_marker_key(*, server: ServerConfig, reqs: List[str]) -> str:
+    """Stable key for caching pip installs across remote runs."""
+
+    parts: List[str] = []
+    parts.append(f"remote_python={server.remote_python}")
+    parts.append(f"conda_env={server.conda_env}")
+    if server.pip_extra_args:
+        parts.append("pip_extra_args=" + " ".join(server.pip_extra_args))
+    for rf in reqs:
+        rfs = str(rf).strip()
+        if not rfs:
+            continue
+        digest = ""
+        try:
+            local_p = _resolve_repo_path(rfs)
+            if local_p.exists() and local_p.is_file():
+                digest = _sha256_hex(local_p.read_bytes())
+        except Exception:
+            digest = ""
+        parts.append(f"req={rfs}#{digest}")
+    return _sha256_hex("\n".join(parts).encode("utf-8", errors="replace"))
+
+
+def _rewrite_remote_path_to_local(*, val: str, remote_run_dir: str, local_host_dir: Path) -> str:
+    s = str(val or "").strip()
+    if not s:
+        return ""
+    rr = str(remote_run_dir).rstrip("/")
+    if s.startswith(rr + "/"):
+        rel = s[len(rr) + 1 :]
+        return str((local_host_dir / rel).resolve())
+    return s
+
+
+def _read_csv_rows(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        r = csv.DictReader(f)
+        out: List[Dict[str, str]] = []
+        for row in r:
+            out.append({k: ("" if v is None else str(v)) for k, v in row.items()})
+        return out
+
+
+def _capture_local_lscpu(*, out_dir: Path) -> None:
+    info_dir = (out_dir / "server_info").resolve()
+    info_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        p = subprocess.run(
+            ["lscpu"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        (info_dir / "lscpu.txt").write_text(p.stdout or "", encoding="utf-8")
+        (info_dir / "lscpu.rc").write_text(str(int(p.returncode)) + "\n", encoding="utf-8")
+    except Exception as e:
+        (info_dir / "lscpu.error.txt").write_text(str(e) + "\n", encoding="utf-8")
+
+
+def _capture_remote_lscpu(*, local_host_dir: Path, server: ServerConfig, dispatch_env: Optional[Dict[str, str]] = None) -> None:
+    info_dir = (local_host_dir / "server_info").resolve()
+    info_dir.mkdir(parents=True, exist_ok=True)
+    host = str(server.host or "")
+    try:
+        (local_host_dir / "server_host.txt").write_text(host + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    target = _ssh_host_target(server.host, server.user)
+    ssh_args = _ssh_base_args(server)
+    prefix = _maybe_sshpass_prefix(server)
+
+    def run_capture(cmd: str, out_name: str) -> None:
+        try:
+            p = subprocess.run(
+                prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(cmd)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=30,
+                env=dispatch_env,
+            )
+            (info_dir / out_name).write_text(p.stdout or "", encoding="utf-8")
+            (info_dir / (out_name + ".rc")).write_text(str(int(p.returncode)) + "\n", encoding="utf-8")
+        except Exception as e:
+            (info_dir / (out_name + ".error.txt")).write_text(str(e) + "\n", encoding="utf-8")
+
+    run_capture("lscpu", "lscpu.txt")
+    # JSON output is useful when present; ignore failures on older util-linux.
+    run_capture("lscpu -J", "lscpu.json")
+
+
+def _build_repo_bundle(*, out_path: Path) -> None:
+    """Create a gzipped tarball of the current repo for remote bootstrap."""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and out_path.is_file():
+        try:
+            if out_path.stat().st_size > 0:
+                return
+        except Exception:
+            pass
+
+    tar_bin = _which("tar")
+    if not tar_bin:
+        raise SystemExit("tar is required to bundle the repo for remote bootstrap")
+
+    # Prefer respecting .gitignore (and other exclude rules) via git.
+    git_bin = _which("git")
+    if git_bin and (REPO_ROOT / ".git").exists():
+        try:
+            ls = subprocess.run(
+                [
+                    git_bin,
+                    "-C",
+                    str(REPO_ROOT),
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+            if ls.returncode == 0 and ls.stdout:
+                # tar reads NUL-separated names from stdin.
+                cmd: List[str] = [
+                    tar_bin,
+                    "-C",
+                    str(REPO_ROOT),
+                    "-czf",
+                    str(out_path),
+                    "--null",
+                    "--files-from=-",
+                ]
+                p = subprocess.run(cmd, input=ls.stdout, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+                if p.returncode != 0:
+                    msg = (p.stdout or b"").decode("utf-8", errors="replace")
+                    raise SystemExit(f"Failed to create repo bundle (tar rc={p.returncode}): {msg}")
+                return
+        except Exception:
+            # Fall back to tar excludes below.
+            pass
+
+    # Fallback: keep the bundle reasonably small with common excludes.
+    excludes = [
+        ".git",
+        ".venv",
+        "**/.venv",
+        "__pycache__",
+        "**/__pycache__",
+        "*.pyc",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "scripts/scale-test/**/result",
+        "scripts/auto-test/**/result",
+        "scripts/**/results",
+    ]
+
+    cmd2: List[str] = [tar_bin, "-czf", str(out_path)]
+    for ex in excludes:
+        cmd2.append(f"--exclude={ex}")
+    cmd2 += ["-C", str(REPO_ROOT), "."]
+
+    p2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
+    if p2.returncode != 0:
+        raise SystemExit(f"Failed to create repo bundle (rc={p2.returncode}): {p2.stdout}")
+
+
+def _ensure_remote_repo_dir(
+    *,
+    server: ServerConfig,
+    target: str,
+    local_host_dir: Path,
+    remote_cfg_dir: str,
+    remote_repo_dir: str,
+    scp_bin: str,
+    dispatch_env: Dict[str, str],
+    continue_on_error: bool,
+    repo_bundle_path: Path,
+) -> bool:
+    """Ensure remote_repo_dir exists; if missing, upload+extract current repo."""
+
+    ssh_args = _ssh_base_args(server)
+    scp_args = _scp_base_args(server)
+    prefix = _maybe_sshpass_prefix(server)
+
+    check_cmd = f"test -d {shlex.quote(remote_repo_dir)}"
+    p = subprocess.run(
+        prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(check_cmd)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        env=dispatch_env,
+    )
+    (local_host_dir / "remote_repo_check.log").write_text(p.stdout or "", encoding="utf-8")
+    if p.returncode == 0:
+        return True
+
+    print(f"[warn] remote_repo_dir missing; bootstrapping repo (host={server.host})")
+    try:
+        _build_repo_bundle(out_path=repo_bundle_path)
+    except Exception as e:
+        (local_host_dir / "repo_bundle_build.error.txt").write_text(str(e) + "\n", encoding="utf-8")
+        return False if continue_on_error else (_ for _ in ()).throw(e)
+
+    remote_bundle = f"{remote_cfg_dir.rstrip('/')}/{repo_bundle_path.name}"
+    scp_cmd = prefix + [str(scp_bin)] + scp_args + [str(repo_bundle_path), f"{target}:{remote_bundle}"]
+    p2 = subprocess.run(
+        scp_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        env=dispatch_env,
+    )
+    (local_host_dir / "scp_repo_bundle.log").write_text(p2.stdout or "", encoding="utf-8")
+    if p2.returncode != 0:
+        if continue_on_error:
+            return False
+        raise SystemExit(f"scp repo bundle failed (host={server.host}, rc={p2.returncode})")
+
+    extract_cmd = (
+        f"mkdir -p {shlex.quote(remote_repo_dir)} && "
+        f"tar -xzf {shlex.quote(remote_bundle)} -C {shlex.quote(remote_repo_dir)}"
+    )
+    p3 = subprocess.run(
+        prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(extract_cmd)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        env=dispatch_env,
+    )
+    (local_host_dir / "remote_repo_extract.log").write_text(p3.stdout or "", encoding="utf-8")
+    if p3.returncode != 0:
+        if continue_on_error:
+            return False
+        raise SystemExit(f"remote repo extract failed (host={server.host}, rc={p3.returncode})")
+
+    return True
+
+
+def _dispatch_multi_host(
+    *,
+    cfg_path: Path,
+    scale: ScaleConfig,
+    result_root: Path,
+    scale_id: str,
+    tee: bool,
+    dry_run: bool,
+    remote_clean_repo: bool,
+) -> int:
+    servers = [s for s in (scale.dispatch.servers or []) if str(getattr(s, "host", "")).strip()]
+    if not servers:
+        raise SystemExit("config.run.servers is empty")
+
+    out_dir = (result_root / scale_id).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    hosts_dir = out_dir / "hosts"
+    hosts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save a copy of the config used for dispatch.
+    try:
+        shutil.copy2(str(cfg_path), str(out_dir / "scale_config.used.json"))
+    except Exception:
+        pass
+
+    rsync_bin = _which("rsync")
+    scp_bin = _which("scp")
+    sshpass_bin = _which("sshpass")
+    if not scp_bin and not dry_run:
+        raise SystemExit("scp is required for multi-host dispatch")
+    if not rsync_bin and not dry_run:
+        raise SystemExit("rsync is required for multi-host dispatch (install rsync)")
+
+    all_rows: List[Dict[str, Any]] = []
+    dispatch_env = _dispatch_subprocess_env()
+    repo_bundle_path = (out_dir / "repo_bundle.tar.gz").resolve()
+
+    def _run_stream_to_log(cmd: List[str], *, log_path: Path, echo: bool) -> int:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w", encoding="utf-8", errors="replace") as f:
+            p = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=dispatch_env,
+            )
+            assert p.stdout is not None
+            try:
+                for line in p.stdout:
+                    f.write(line)
+                    f.flush()
+                    if echo:
+                        # Stream as-is (already contains newline)
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+            finally:
+                try:
+                    p.stdout.close()
+                except Exception:
+                    pass
+            return int(p.wait())
+
+    for server in servers:
+        host = str(server.host)
+        target = _ssh_host_target(server.host, server.user)
+        host_tag = _safe_name(host.replace(":", "_"))
+        local_host_dir = (hosts_dir / host_tag).resolve()
+        local_host_dir.mkdir(parents=True, exist_ok=True)
+
+        ssh_args = _ssh_base_args(server)
+        scp_args = _scp_base_args(server)
+        prefix = _maybe_sshpass_prefix(server)
+        if server.password and not sshpass_bin and not dry_run:
+            raise SystemExit("sshpass is required when config.run.servers[*].password is set (install sshpass or use SSH keys)")
+
+        remote_cfg_dir = f"/tmp/scale_test_dispatch/{scale_id}"
+        remote_cfg_path = f"{remote_cfg_dir}/{cfg_path.name}"
+        remote_repo_dir = server.remote_repo_dir
+        remote_result_root = server.remote_result_root or str(result_root)
+        remote_run_dir = f"{remote_result_root.rstrip('/')}/{scale_id}"
+
+        pre_req_items: List[Tuple[PreRequirement, Path, str]] = []
+        for pr in (server.pre_requirements or []):
+            f = str(pr.file or "").strip()
+            if not f:
+                continue
+            p = Path(f).expanduser()
+            if not p.is_absolute():
+                p = (REPO_ROOT / p).resolve()
+            remote_p = f"{remote_cfg_dir}/{p.name}"
+            pre_req_items.append((pr, p, remote_p))
+
+        before_cmds: List[str] = []
+        after_cmds: List[str] = []
+        for pr, _, remote_p in pre_req_items:
+            cmd = f"bash {shlex.quote(remote_p)}" if pr.mode == "bash" else f". {shlex.quote(remote_p)}"
+            if pr.source_bashrc_after:
+                cmd = cmd + "; . ~/.bashrc >/dev/null 2>&1 || true"
+            if pr.stage == "after_conda":
+                after_cmds.append(cmd)
+            else:
+                before_cmds.append(cmd)
+
+        pre_req_prefix = ""
+        if before_cmds:
+            pre_req_prefix += " ".join(c + ";" for c in before_cmds) + " "
+        if after_cmds:
+            if not str(server.conda_env or "").strip():
+                raise SystemExit(f"pre_requirements has after_conda stage but conda_env is empty (host={host})")
+            # Run in the same shell so exports can affect later steps.
+            pre_req_prefix += (
+                "eval \"$(conda shell.bash hook)\"; "
+                + f"conda activate {shlex.quote(server.conda_env.strip())}; "
+                + " ".join(c + ";" for c in after_cmds)
+                + " "
+            )
+
+        setup_cmds: List[str] = []
+
+        # Preflight: kill any stale listener on the configured base_url port *before*
+        # running setup/pip installs. This avoids confusing "CPU is pegged" symptoms
+        # from an old server process that is unrelated to the current run.
+        base_port = _port_from_base_url(scale.job_template)
+        if base_port:
+            setup_cmds.append(
+                "PORT="
+                + shlex.quote(str(int(base_port)))
+                + "; "
+                + "if command -v lsof >/dev/null 2>&1; then "
+                + "pids=$(lsof -t -iTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true); "
+                + "if [ -n \"$pids\" ]; then "
+                + "echo \"[setup] killing stale listeners on :${PORT}: $pids\"; "
+                + "kill -TERM $pids >/dev/null 2>&1 || true; "
+                + "sleep 1; "
+                + "kill -KILL $pids >/dev/null 2>&1 || true; "
+                + "fi; "
+                + "fi"
+            )
+
+        for s in (server.pre_setup_cmds or []):
+            ss = str(s).strip()
+            if ss:
+                setup_cmds.append(ss)
+
+        if bool(server.install_requirements):
+            reqs: List[str] = []
+            base_req = _requirements_profile_default_file(server.requirements_profile)
+            if base_req:
+                reqs.append(base_req)
+            for rf in (server.requirements_files or []):
+                rfs = str(rf).strip()
+                if rfs:
+                    reqs.append(rfs)
+            # De-dup while preserving order.
+            seen: set[str] = set()
+            reqs2: List[str] = []
+            for rf in reqs:
+                if rf in seen:
+                    continue
+                seen.add(rf)
+                reqs2.append(rf)
+            reqs = reqs2
+
+            pip_args = " ".join(shlex.quote(a) for a in (server.pip_extra_args or []))
+            marker_key = _compute_requirements_marker_key(server=server, reqs=reqs)
+            marker_dir = "~/.cache/multi-model-process-eval/pip_markers"
+            marker_file = f"{marker_dir}/{marker_key}.ok"
+
+            # Install all requirements in one shot (less output), and cache via marker.
+            # Marker is only written on success.
+            req_flags = " ".join(f"-r {shlex.quote(rf)}" for rf in reqs)
+            pip_base = (
+                f"{server.remote_python} -m pip install --progress-bar off --disable-pip-version-check --no-input --root-user-action=ignore {pip_args}".strip()
+            )
+            setup_cmds.append(
+                f"mkdir -p {shlex.quote(marker_dir)}; "
+                + f"if [ -f {shlex.quote(marker_file)} ]; then "
+                + f"echo \"[setup] pip requirements cached: {marker_key}\"; "
+                + "else "
+                + f"echo \"[setup] installing pip requirements (cache miss): {marker_key}\"; "
+                + f"{pip_base} {req_flags}; "
+                + f"date -u +%Y-%m-%dT%H:%M:%SZ > {shlex.quote(marker_file)}; "
+                + "fi"
+            )
+
+        setup = " ".join(f"{cmd};" for cmd in (setup_cmds or [])).strip()
+        remote_cmd = (
+            "set -e; "
+            + "echo '[dispatch] phase=pre_requirements'; "
+            + pre_req_prefix
+            + "echo '[dispatch] phase=setup'; "
+            + f"cd {shlex.quote(remote_repo_dir)}; "
+            + ("echo '[dispatch] setup_cmds=begin'; " if setup else "")
+            + (setup + " " if setup else "")
+            + ("echo '[dispatch] setup_cmds=end'; " if setup else "")
+            + "echo '[dispatch] phase=run'; "
+            + f"{server.remote_python} scripts/scale-test/embedding/run_scale_fix_token_len.py "
+            + f"--config {shlex.quote(remote_cfg_path)} "
+            + "--no-ssh-dispatch "
+            + f"--scale-id {shlex.quote(scale_id)} "
+            + f"--result-root {shlex.quote(remote_result_root)} "
+            + ("--tee " if tee else "")
+            + ("--dry-run " if dry_run else "")
+        ).strip()
+
+        print(f"[info] dispatch host={host}")
+        print(f"[info] remote_repo_dir={remote_repo_dir}")
+        print(f"[info] remote_run_dir={remote_run_dir}")
+
+        if not tee:
+            # Without --tee, the SSH output is still captured to this log, but nothing
+            # is printed to the console until the remote command finishes.
+            remote_run_log_hint = (local_host_dir / "remote_run.log").resolve()
+            print(f"[info] (no --tee) streaming disabled; tail this log for progress: {remote_run_log_hint}")
+
+        if dry_run:
+            # Avoid printing secrets. (sshpass is only used when password is provided.)
+            if server.password:
+                print(f"[dry-run] ssh (password auth) {target} bash -lc <remote_cmd>")
+            else:
+                print(f"[dry-run] ssh {target} bash -lc {remote_cmd}")
+            continue
+
+        # 1) mkdir remote cfg dir
+        mkdir_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(f"mkdir -p {shlex.quote(remote_cfg_dir)}")]
+        p = subprocess.run(
+            mkdir_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            env=dispatch_env,
+        )
+        (local_host_dir / "ssh_mkdir.log").write_text(p.stdout or "", encoding="utf-8")
+        if p.returncode != 0:
+            print(f"[error] ssh mkdir failed (host={host}, rc={p.returncode})")
+            return int(p.returncode)
+
+        # Optional: blow away remote_repo_dir, then recreate it before rsync.
+        if remote_clean_repo:
+            safe_repo_dir = _validate_remote_repo_dir_for_delete(remote_repo_dir)
+            clean_cmd = f"rm -rf {shlex.quote(safe_repo_dir)} && mkdir -p {shlex.quote(safe_repo_dir)}"
+            if tee:
+                print(f"[dispatch] cleaning remote_repo_dir on {host}: {safe_repo_dir}")
+            if dry_run:
+                (local_host_dir / "remote_repo_clean.log").write_text(
+                    _log_meta_header(cmd_for_log=clean_cmd, rc=0) + "[dry-run]\n",
+                    encoding="utf-8",
+                )
+            else:
+                p_clean = subprocess.run(
+                    prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(clean_cmd)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    env=dispatch_env,
+                )
+                (local_host_dir / "remote_repo_clean.log").write_text(
+                    _log_meta_header(cmd_for_log=clean_cmd, rc=int(p_clean.returncode)) + (p_clean.stdout or ""),
+                    encoding="utf-8",
+                )
+                if p_clean.returncode != 0:
+                    msg = f"remote repo clean failed (host={host}, rc={p_clean.returncode})"
+                    if scale.continue_on_error:
+                        print(f"[warn] {msg}; continuing. See {local_host_dir / 'remote_repo_clean.log'}")
+                    else:
+                        raise SystemExit(msg)
+
+        # 1b) If remote_repo_dir is missing, upload+extract the local repo into place.
+        ok_repo = True
+        if not remote_clean_repo:
+            ok_repo = _ensure_remote_repo_dir(
+                server=server,
+                target=target,
+                local_host_dir=local_host_dir,
+                remote_cfg_dir=remote_cfg_dir,
+                remote_repo_dir=remote_repo_dir,
+                scp_bin=str(scp_bin),
+                dispatch_env=dispatch_env,
+                continue_on_error=scale.continue_on_error,
+                repo_bundle_path=repo_bundle_path,
+            )
+        if not ok_repo:
+            print(f"[error] remote repo bootstrap failed (host={host}). See logs under {local_host_dir}")
+            if not scale.continue_on_error:
+                return 1
+            continue
+
+        # 1c) Sync local repo to the remote repo dir so the remote host always
+        # runs the latest runner code. Honor .gitignore (rsync filter) and
+        # exclude .git. This avoids confusing cases where remote runs stale code
+        # and misses pinning debug output.
+        if rsync_bin and not dry_run:
+            rsync_ssh = _rsync_ssh_command(server)
+            rsync_ssh_log = rsync_ssh
+            if server.password:
+                rsync_ssh_log = rsync_ssh_log.replace(str(server.password), "<redacted>")
+            rsync_repo_cmd = [
+                str(rsync_bin),
+                "-az",
+                "--delete",
+                "--prune-empty-dirs",
+                "--filter=:- .gitignore",
+                "--exclude=.git/",
+                "-e",
+                rsync_ssh,
+                str(REPO_ROOT).rstrip("/") + "/",
+                f"{target}:{remote_repo_dir.rstrip('/')}/",
+            ]
+            if tee:
+                print(f"[dispatch] syncing repo to {host}:{remote_repo_dir} (honor .gitignore)")
+            p1c = subprocess.run(
+                rsync_repo_cmd,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                env=dispatch_env,
+            )
+            rsync_dest = f"{target}:{remote_repo_dir.rstrip('/')}/"
+            rsync_cmd_for_log = (
+                f"{shlex.quote(str(rsync_bin))} -az --delete --prune-empty-dirs --filter=:- .gitignore --exclude=.git/ "
+                + f"-e {shlex.quote(rsync_ssh_log)} {shlex.quote(str(REPO_ROOT).rstrip('/') + '/')} {shlex.quote(rsync_dest)}"
+            )
+            (local_host_dir / "rsync_repo_push.log").write_text(
+                _log_meta_header(cmd_for_log=rsync_cmd_for_log, rc=int(p1c.returncode)) + (p1c.stdout or ""),
+                encoding="utf-8",
+            )
+            if p1c.returncode != 0:
+                print(
+                    f"[warn] rsync repo push failed (host={host}, rc={p1c.returncode}). "
+                    f"Remote may run stale code. See {local_host_dir / 'rsync_repo_push.log'}"
+                )
+                if not scale.continue_on_error:
+                    return int(p1c.returncode)
+
+        # 2) scp config
+        scp_cmd = prefix + [str(scp_bin)] + scp_args + [str(cfg_path), f"{target}:{remote_cfg_path}"]
+        p2 = subprocess.run(
+            scp_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            env=dispatch_env,
+        )
+        (local_host_dir / "scp_config.log").write_text(p2.stdout or "", encoding="utf-8")
+        if p2.returncode != 0:
+            print(f"[error] scp config failed (host={host}, rc={p2.returncode})")
+            if not scale.continue_on_error:
+                return int(p2.returncode)
+            continue
+
+        # 2b) scp pre-requirements scripts (optional)
+        if pre_req_items:
+            log_lines: List[str] = []
+            for _, local_p, remote_p in pre_req_items:
+                if not local_p.exists():
+                    raise SystemExit(f"pre_requirements file not found: {local_p}")
+                scp_cmd2 = prefix + [str(scp_bin)] + scp_args + [str(local_p), f"{target}:{remote_p}"]
+                p2b = subprocess.run(
+                    scp_cmd2,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    env=dispatch_env,
+                )
+                log_lines.append(p2b.stdout or "")
+                if p2b.returncode != 0:
+                    (local_host_dir / "scp_pre_requirements.log").write_text("\n".join(log_lines), encoding="utf-8")
+                    print(f"[error] scp pre-requirements failed (host={host}, rc={p2b.returncode})")
+                    if not scale.continue_on_error:
+                        return int(p2b.returncode)
+                    continue
+            (local_host_dir / "scp_pre_requirements.log").write_text("\n".join(log_lines), encoding="utf-8")
+
+        # 3) run remote sweep
+        run_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(remote_cmd)]
+        remote_run_log = local_host_dir / "remote_run.log"
+        rc3 = _run_stream_to_log(run_cmd, log_path=remote_run_log, echo=bool(tee))
+        if rc3 != 0:
+            print(f"[error] remote run failed (host={host}, rc={rc3}). See {remote_run_log}")
+            if not scale.continue_on_error:
+                return int(rc3)
+
+        # 3b) capture server info (best-effort)
+        try:
+            _capture_remote_lscpu(local_host_dir=local_host_dir, server=server, dispatch_env=dispatch_env)
+        except Exception:
+            pass
+
+        # 4) rsync back
+        rsync_ssh = _rsync_ssh_command(server)
+        rsync_src = f"{target}:{remote_run_dir.rstrip('/')}/"
+        rsync_cmd = [str(rsync_bin), "-az", "-e", rsync_ssh, rsync_src, str(local_host_dir) + "/"]
+        p4 = subprocess.run(
+            rsync_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            env=dispatch_env,
+        )
+        (local_host_dir / "rsync_back.log").write_text(p4.stdout or "", encoding="utf-8")
+        if p4.returncode != 0:
+            print(f"[error] rsync failed (host={host}, rc={p4.returncode}). See {local_host_dir / 'rsync_back.log'}")
+            if not scale.continue_on_error:
+                return int(p4.returncode)
+            continue
+
+        # 5) load host aggregate and rewrite paths to local copies
+        host_agg = local_host_dir / "aggregate.csv"
+        host_rows = _read_csv_rows(host_agg)
+        for r in host_rows:
+            r2: Dict[str, Any] = dict(r)
+            r2["server_host"] = host
+            for k in ["log_path", "metrics_path", "emon_output_path", "emon_summary_xlsx", "emon_process_log"]:
+                if k in r2:
+                    r2[k] = _rewrite_remote_path_to_local(
+                        val=str(r2.get(k, "")),
+                        remote_run_dir=remote_run_dir,
+                        local_host_dir=local_host_dir,
+                    )
+            all_rows.append(r2)
+
+    if dry_run:
+        print("[ok] dry-run complete (no remote execution, no results copied)")
+        return 0
+
+    # Write combined aggregate in the local run root.
+    agg_csv = out_dir / "aggregate.csv"
+    _write_aggregate_csv(out_csv=agg_csv, rows=all_rows)
+    print(f"[ok] Wrote aggregate: {agg_csv}")
+    return 0
 
 
 def _generate_auto_test_config(
@@ -373,7 +1512,12 @@ def _generate_auto_test_config(
     # - user did not explicitly specify NUMACTL_* / SERVER_NUMACTL_* in extra_env
     # - server spec does not already configure servers.<backend>.numactl
     #
-    # If CPUs span multiple nodes, we still bind cores but skip membind/cpunodebind.
+    # We only auto-bind CPU cores (numactl -C). We intentionally do NOT auto-add
+    # --cpunodebind/--membind because:
+    # - it's redundant when -C already pins to a node-local core subset
+    # - it can be harmful if the CPU list spans multiple nodes
+    # Users can still explicitly set NUMACTL_CPUNODEBIND/NUMACTL_MEMBIND (and
+    # SERVER_* variants) in extra_env when they want strict node/memory binding.
     # -------------------------
     inferred_node: Optional[int] = None
     if (cpu_expr or "").strip():
@@ -417,10 +1561,7 @@ def _generate_auto_test_config(
                 # Always bind server cores to the scale CPU expr.
                 numactl_obj["cores"] = cpu_expr.strip()
 
-                # Bind memory locally when we can infer a single NUMA node.
-                if inferred_node is not None and inferred_node >= 0:
-                    numactl_obj["cpunodebind"] = str(inferred_node)
-                    numactl_obj["membind"] = str(inferred_node)
+                # Do not auto-add cpunodebind/membind; keep only core pinning.
 
                 s["numactl"] = numactl_obj
 
@@ -475,11 +1616,13 @@ def _generate_auto_test_config(
                 ):
                     if not str(env.get("NUMACTL_CORES") or "").strip():
                         env["NUMACTL_CORES"] = cpu_expr.strip()
-                    if inferred_node is not None and inferred_node >= 0:
-                        if not str(env.get("NUMACTL_CPUNODEBIND") or "").strip():
-                            env["NUMACTL_CPUNODEBIND"] = str(inferred_node)
-                        if not str(env.get("NUMACTL_MEMBIND") or "").strip():
-                            env["NUMACTL_MEMBIND"] = str(inferred_node)
+                    # Also bind the *server* side explicitly. This is important
+                    # because some environments accept systemd-run properties
+                    # but do not actually enforce cpusets, and sglang can
+                    # otherwise fan out across all host CPUs.
+                    if not str(env.get("SERVER_NUMACTL_CORES") or "").strip():
+                        env["SERVER_NUMACTL_CORES"] = cpu_expr.strip()
+                    # Do not auto-add NUMACTL_CPUNODEBIND/NUMACTL_MEMBIND.
 
                 jobs.append(
                     {
@@ -512,6 +1655,19 @@ def _run_auto_test(
     if not runner.exists():
         raise SystemExit(f"Missing runner: {runner}")
 
+    def _wrap_with_scope_probe(inner_cmd: List[str]) -> List[str]:
+        # Runs inside the constrained scope / taskset wrapper (if any) so we can
+        # see what CPU/mem restrictions actually apply to the workload.
+        script = (
+            "echo '[scope] pid='$$; "
+            "if [[ -r /proc/self/status ]]; then "
+            "awk '/^Cpus_allowed_list:|^Mems_allowed_list:|^Cpus_allowed:/ {print \"[scope] \" $0}' /proc/self/status || true; "
+            "fi; "
+            "if command -v taskset >/dev/null 2>&1; then taskset -pc $$ || true; fi; "
+            "exec \"$@\""
+        )
+        return ["bash", "-lc", script, "bash"] + inner_cmd
+
     cmd = [sys.executable, str(runner), "--config", str(auto_test_config_path)]
     if tee:
         cmd.append("--tee")
@@ -519,7 +1675,9 @@ def _run_auto_test(
         cmd.append("--dry-run")
 
     mem_bytes = _bytes_from_gb(mem_gb)
-    full_cmd, method = _constrained_cmd(cmd=cmd, cpu_expr=cpu_expr, mem_bytes=mem_bytes)
+    want_constraints = bool((cpu_expr or "").strip() or (mem_bytes and mem_bytes > 0))
+    cmd2 = _wrap_with_scope_probe(cmd) if want_constraints else cmd
+    full_cmd, method = _constrained_cmd(cmd=cmd2, cpu_expr=cpu_expr, mem_bytes=mem_bytes)
     if method == "none" and ((cpu_expr or "").strip() or (mem_bytes and mem_bytes > 0)):
         print("[warn] No resource limiter found (systemd-run/taskset/prlimit). Running without enforcement.")
     else:
@@ -531,9 +1689,14 @@ def _run_auto_test(
 
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     with stdout_log.open("w", encoding="utf-8") as f:
+        env = os.environ.copy()
+        if (cpu_expr or "").strip():
+            # Let the child runner self-apply affinity and print evidence.
+            env["AUTO_TEST_CPU_EXPR"] = cpu_expr.strip()
         p = subprocess.Popen(
             full_cmd,
             cwd=str(work_dir),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -686,6 +1849,7 @@ def _write_aggregate_csv(*, out_csv: Path, rows: List[Dict[str, Any]]) -> None:
         "sglang_max_total_tokens",
         "tps_per_cpu",
         "emon_kv_json",
+        "server_host",
     ]
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", encoding="utf-8", newline="") as f:
@@ -714,14 +1878,94 @@ def _write_aggregate_csv(*, out_csv: Path, rows: List[Dict[str, Any]]) -> None:
             r2["tps_per_cpu"] = (tps / cpu_count) if cpu_count > 0 else ""
 
             w.writerow({k: r2.get(k, "") for k in fields})
+    pass
+
+def _run_post_analyze(*, run_dir: Path, tee: bool) -> None:
+    analyzer = (Path(__file__).resolve().parent / "analyze_run.py").resolve()
+    if not analyzer.exists():
+        print(f"[warn] analyzer not found; skipping: {analyzer}")
+        return
+
+    out_dir = run_dir / "analysis"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "autogen_analyze_run.log"
+
+    venv_py = (REPO_ROOT / ".venv" / "bin" / "python").resolve()
+    py = str(venv_py) if venv_py.exists() else sys.executable
+    cmd = [py, str(analyzer), str(run_dir)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=15 * 60,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"[warn] analyze_run.py timed out; see log: {log_path}"
+        print(msg)
+        try:
+            log_path.write_text(msg + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        return
+    except Exception as e:
+        msg = f"[warn] analyze_run.py failed to execute: {e}"
+        print(msg)
+        try:
+            log_path.write_text(msg + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        return
+
+    out = proc.stdout or ""
+    try:
+        log_path.write_text(out, encoding="utf-8")
+    except Exception:
+        pass
+
+    if tee and out:
+        print(out, end="" if out.endswith("\n") else "\n")
+
+    if proc.returncode != 0:
+        print(f"[warn] post-run analysis failed (rc={proc.returncode}). See: {log_path}")
+        return
+
+    print(f"[ok] Wrote analysis: {out_dir}")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to scale-test config JSON")
     ap.add_argument("--tee", action="store_true", help="Stream auto-test output to console")
+    ap.add_argument("--no-tee", action="store_true", help="Do not stream output to console (still logs to files)")
     ap.add_argument("--dry-run", action="store_true", help="Do not execute jobs; print commands only")
+    ap.add_argument("--no-analyze", action="store_true", help="Skip post-run analysis generation")
+    ap.add_argument(
+        "--remote-clean-repo",
+        nargs="?",
+        const="true",
+        default="false",
+        help=(
+            "If true, delete the remote_repo_dir on remote hosts before syncing the local repo via rsync "
+            "(default: false). Accepts optional value: true/false."
+        ),
+    )
+    ap.add_argument(
+        "--no-ssh-dispatch",
+        action="store_true",
+        help="Ignore config.run.servers and run locally (useful on remote workers)",
+    )
+    ap.add_argument("--scale-id", default="", help="Override scale_id (default: utc timestamp)")
+    ap.add_argument(
+        "--result-root",
+        default="",
+        help="Override result_root directory (useful for remote dispatch)",
+    )
     args = ap.parse_args()
+
+    tee = bool(args.tee) and not bool(args.no_tee)
 
     cfg_path_in = Path(args.config)
     cfg_path: Path
@@ -744,9 +1988,40 @@ def main() -> int:
         )
 
     scale = _parse_scale_config(cfg_path)
-    scale_id = _utc_compact()
-    out_dir = scale.result_root / scale_id
+
+    # Allow overriding result_root from CLI.
+    result_root = scale.result_root
+    if str(args.result_root or "").strip():
+        rr_in = Path(str(args.result_root)).expanduser()
+        if rr_in.is_absolute():
+            result_root = rr_in.resolve()
+        else:
+            result_root = (REPO_ROOT / rr_in).resolve()
+
+    scale_id = str(args.scale_id or "").strip() or _utc_compact()
+
+    # Multi-host dispatch mode: run the same sweep on all servers via SSH and
+    # copy results back under <result_root>/<scale_id>/hosts/<host>/.
+    if scale.dispatch.servers and not bool(args.no_ssh_dispatch):
+        return _dispatch_multi_host(
+            cfg_path=cfg_path,
+            scale=scale,
+            result_root=result_root,
+            scale_id=scale_id,
+            tee=tee,
+            dry_run=bool(args.dry_run),
+            remote_clean_repo=_parse_bool(args.remote_clean_repo),
+        )
+
+    out_dir = result_root / scale_id
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Capture local server CPU info for this run (best-effort).
+    if not args.dry_run:
+        try:
+            _capture_local_lscpu(out_dir=out_dir)
+        except Exception:
+            pass
 
     print(f"[info] scale_id={scale_id}")
 
@@ -807,7 +2082,7 @@ def main() -> int:
         rc = _run_auto_test(
             auto_test_config_path=auto_test_cfg_path,
             work_dir=REPO_ROOT,
-            tee=bool(args.tee),
+            tee=tee,
             dry_run=bool(args.dry_run),
             cpu_expr=cpu_expr,
             mem_gb=scale.mem_gb,
@@ -902,7 +2177,7 @@ def main() -> int:
     if scale.emon_process_after_run and rows:
         _process_emon_dirs(
             rows=rows,
-            tee=bool(args.tee),
+            tee=tee,
             process_cmd=scale.emon_process_cmd,
             expected_output=scale.emon_expected_output,
         )
@@ -911,6 +2186,9 @@ def main() -> int:
     agg_csv = out_dir / "aggregate.csv"
     _write_aggregate_csv(out_csv=agg_csv, rows=rows)
     print(f"[ok] Wrote aggregate: {agg_csv}")
+
+    if (not args.no_analyze) and rows:
+        _run_post_analyze(run_dir=out_dir, tee=tee)
 
     if single_variant:
         run_id = _find_single_run_id(out_dir)
