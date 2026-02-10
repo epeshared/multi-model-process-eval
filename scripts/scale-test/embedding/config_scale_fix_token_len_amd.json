@@ -34,7 +34,7 @@
       {
         "ip": "172.16.116.49",
         "username": "root",
-        "password": "intel1234",
+        "password": "",
         "conda_env": "sglang-cpu",
         "install_requirements": true,
         "requirements_files": [
