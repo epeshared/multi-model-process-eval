@@ -296,6 +296,103 @@ def _render_run_summary_html(
         except Exception:
             return None
 
+    def _tps_pivot_table_html() -> str:
+        """Render a compact TPS pivot table (rows=batch_size, cols=token_len)."""
+
+        try:
+            pd_mod = __import__("pandas")
+        except Exception:
+            return '<div class="muted">No pandas; cannot build TPS pivot table.</div>'
+
+        if df_jobs is None or getattr(df_jobs, "empty", True):
+            return '<div class="muted">No job data.</div>'
+
+        need = {"batch_size", "token_len", "tps"}
+        cols = set(getattr(df_jobs, "columns", []))
+        if not need.issubset(cols):
+            return '<div class="muted">Missing required columns for TPS pivot.</div>'
+
+        d = df_jobs.dropna(subset=["batch_size", "token_len", "tps"]).copy()
+        if getattr(d, "empty", True):
+            return '<div class="muted">No non-empty rows for TPS pivot.</div>'
+
+        # Prefer using derived fields when present.
+        if "cpu_count" in d.columns:
+            d["cpu_count"] = pd_mod.to_numeric(d["cpu_count"], errors="coerce")
+        if "kv_cap" in d.columns:
+            d["kv_cap"] = pd_mod.to_numeric(d["kv_cap"], errors="coerce")
+
+        # If multiple slices exist (cpu/kv/model), pick the most common slice.
+        slice_cols = [
+            c
+            for c in ["resource_cpu", "cpu_count", "kv_cap", "sglang_max_total_tokens"]
+            if c in d.columns and d[c].nunique(dropna=False) > 1
+        ]
+        slice_note = ""
+        if slice_cols:
+            try:
+                counts = d.groupby(slice_cols, dropna=False).size().reset_index(name="n")
+                counts = counts.sort_values(["n"], ascending=False, kind="mergesort")
+                best = counts.iloc[0]
+                mask = None
+                for c in slice_cols:
+                    v = best[c]
+                    if mask is None:
+                        mask = d[c].isna() if pd_mod.isna(v) else (d[c] == v)
+                    else:
+                        mask = mask & (d[c].isna() if pd_mod.isna(v) else (d[c] == v))
+                if mask is not None:
+                    d = d[mask]
+                picked = ", ".join(f"{c}={best[c]}" for c in slice_cols)
+                slice_note = f'<div class="sub">slice: <span class="mono">{html.escape(picked)}</span></div>'
+            except Exception:
+                slice_note = ""
+
+        pv = d.pivot_table(index="batch_size", columns="token_len", values="tps", aggfunc="mean")
+        if getattr(pv, "empty", True):
+            return '<div class="muted">Empty TPS pivot.</div>'
+
+        # Sort axes numerically.
+        try:
+            pv = pv.sort_index(axis=0)
+        except Exception:
+            pass
+        try:
+            pv = pv.reindex(sorted(list(pv.columns), key=lambda x: float(x)), axis=1)
+        except Exception:
+            pass
+
+        def fmt(v: Any) -> str:
+            try:
+                if pd_mod.isna(v):
+                    return ""
+            except Exception:
+                pass
+            try:
+                return f"{float(v):.3f}"
+            except Exception:
+                return str(v)
+
+        ths = "".join(f"<th class=\"mono\">tok{html.escape(str(int(float(c))) if float(c).is_integer() else str(c))}</th>" for c in pv.columns)
+        head = f"<thead><tr><th>batch_size</th>{ths}</tr></thead>"
+        body_rows: List[str] = []
+        for bs in pv.index:
+            tds = "".join(f"<td class=\"mono\">{html.escape(fmt(pv.loc[bs, c]))}</td>" for c in pv.columns)
+            body_rows.append(f"<tr><td class=\"mono\">bs={html.escape(fmt(bs))}</td>{tds}</tr>")
+        table = (
+            "<div class=\"table-scroll\">"
+            "<table class=\"table small\">"
+            f"{head}<tbody>{''.join(body_rows)}</tbody>"
+            "</table>"
+            "</div>"
+        )
+        return (
+            "<h3>TPS pivot（行=batch_size，列=token_len）</h3>"
+            "<div class=\"sub\">统计口径：对同一 token_len×batch_size 的 TPS 做 mean（必要时先选取最常见 slice）。</div>"
+            + slice_note
+            + table
+        )
+
     def _to_num(pd_mod: Any, s: Any) -> Any:
         try:
             return pd_mod.to_numeric(s, errors="coerce")
@@ -324,7 +421,10 @@ def _render_run_summary_html(
                 f"<div class=\"muted\">Missing required columns: {html.escape(', '.join([c for c in need if c not in cols]))}</div>"
             , stats_out)
 
-        d = df.dropna(subset=need).copy()
+        # IMPORTANT: do NOT drop rows based on group columns. Some dimensions
+        # (e.g. kv_cap parsed from sglang_max_total_tokens="auto") become NaN;
+        # dropping NaN here would erase the entire run from the summary.
+        d = df.dropna(subset=[x, y]).copy()
         if getattr(d, "empty", True):
             return (f"<h3>{html.escape(title)}</h3><div class=\"muted\">No non-empty rows.</div>", stats_out)
         d[x] = _to_num(pd_mod, d[x])
@@ -335,7 +435,7 @@ def _render_run_summary_html(
         ratios: List[float] = []
         cors: List[float] = []
         n_groups = 0
-        for _, g in d.groupby(group_cols, dropna=True):
+        for _, g in d.groupby(group_cols, dropna=False):
             n_groups += 1
             g2 = g.dropna(subset=[x, y]).copy()
             if g2.empty or g2[x].nunique() < 2:
@@ -532,33 +632,46 @@ def _render_run_summary_html(
         pass
 
     # Overall impact ranking (by median max/min ratio when available)
-    rank_items: List[Tuple[str, float]] = []
-    for name, st in [
+    # Always list key dimensions; show N/A if a dimension wasn't swept or lacks
+    # enough in-group points.
+    rank_src: List[Tuple[str, Dict[str, float]]] = [
         ("token_len", token_stats),
         ("batch_size", bs_stats),
         ("kv_cap", kv_stats),
-    ]:
+    ]
+
+    ranked: List[Tuple[str, float]] = []
+    missing: List[str] = []
+    for name, st in rank_src:
         r = st.get("median_ratio")
-        if r is not None:
-            try:
-                rr = float(r)
-                if rr == rr:
-                    rank_items.append((name, rr))
-            except Exception:
-                pass
-    rank_items.sort(key=lambda t: t[1], reverse=True)
-    rank_html = "<div class=\"muted\">No ranking available.</div>"
-    if rank_items:
-        lis = "".join(
-            f"<li><span class=\"mono\">{html.escape(n)}</span>：median(max/min)=<b>{v:.2f}×</b></li>" for n, v in rank_items
+        try:
+            rr = float(r) if r is not None else float("nan")
+        except Exception:
+            rr = float("nan")
+        if rr == rr:
+            ranked.append((name, rr))
+        else:
+            missing.append(name)
+
+    ranked.sort(key=lambda t: t[1], reverse=True)
+
+    lis2: List[str] = []
+    for n, v in ranked:
+        lis2.append(f"<li><span class=\"mono\">{html.escape(n)}</span>：median(max/min)=<b>{v:.2f}×</b></li>")
+    for n in missing:
+        lis2.append(
+            f"<li><span class=\"mono\">{html.escape(n)}</span>：<span class=\"muted\">N/A（未 sweep 或有效点不足）</span></li>"
         )
-        rank_html = f"<ul>{lis}</ul>"
+    rank_html = f"<ul>{''.join(lis2)}</ul>" if lis2 else "<div class=\"muted\">No ranking available.</div>"
 
     parts.append(_h3("总体结论（影响强度排序）"))
     parts.append(
         "<div class=\"sub\">说明：以各维度在固定其它条件下的组内 TPS/throughput 波动（median max/min）衡量影响强度；CPU 另用 speedup/efficiency 描述。</div>"
     )
     parts.append(rank_html)
+
+    # Add the TPS pivot table explicitly (commonly used in dashboards)
+    parts.append(_tps_pivot_table_html())
 
     parts.append(token_html)
     parts.append(bs_html)
@@ -773,7 +886,15 @@ def main() -> int:
     metric_cols = [c for c in ["tps", "latency_sec", "tps_per_cpu"] if c in df_jobs.columns]
 
     if group_cols and metric_cols and not df_jobs.empty:
-        df_g = df_jobs.groupby(group_cols, as_index=False)[metric_cols].mean(numeric_only=True)
+        # Some optional dimensions (e.g. resource_mem_gb) may be empty/NaN for all rows;
+        # pandas groupby drops NaN groups by default, which would incorrectly erase the run.
+        df_g = df_jobs.groupby(group_cols, as_index=False, dropna=False)[metric_cols].mean(numeric_only=True)
+
+        # Some index dimensions may be entirely missing (NaN). If any index
+        # column is NaN, pivot_table can drop the row; normalize missing values
+        # to empty strings for stability.
+        if "resource_mem_gb" in df_g.columns:
+            df_g["resource_mem_gb"] = df_g["resource_mem_gb"].fillna("")
 
         # Make wide pivot for TPS and latency.
         index_cols = [c for c in ["variant", "resource_cpu", "resource_cpu_count", "resource_mem_gb", "sglang_max_total_tokens"] if c in df_g.columns]
@@ -821,8 +942,12 @@ def main() -> int:
     # We analyze mean behavior per unique combination; this also collapses repeats.
     base_dims = [c for c in ["resource_cpu", "cpu_count", "kv_cap", "sglang_max_total_tokens", "batch_size", "token_len"] if c in df_jobs.columns]
     value_dims = [c for c in ["tps", "tps_per_cpu", "tokens_per_sec", "tokens_per_sec_per_cpu", "avg_batch_time_sec"] if c in df_jobs.columns]
+    # NOTE: kv_cap is numeric-parsed from sglang_max_total_tokens. When KV cap is
+    # "auto" it becomes NaN; pandas groupby drops NaN groups by default, which
+    # would incorrectly produce empty scalability CSVs. Use dropna=False so
+    # "auto" runs still appear in scaling outputs.
     df_mean = (
-        df_jobs.groupby(base_dims, as_index=False)[value_dims]
+        df_jobs.groupby(base_dims, as_index=False, dropna=False)[value_dims]
         .mean(numeric_only=True)
         .copy()
         if (base_dims and value_dims and not df_jobs.empty)
@@ -1182,6 +1307,7 @@ def main() -> int:
             fig.tight_layout()
             fig.savefig(out_dir / "plot_kv_cap_scaling.png", dpi=160)
             plt.close(fig)
+
 
     print(f"[ok] Wrote: {out_dir / 'summary_pivot.csv'}")
     print(f"[ok] Wrote: {out_dir / 'emon_socket_metrics.csv'}")

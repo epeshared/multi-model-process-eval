@@ -26,6 +26,18 @@ is on your `PATH`. Make sure your active Python environment has the required dep
 
 - `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
 
+### Resume an interrupted run (skip completed)
+
+If a run was interrupted (SSH disconnect, reboot, etc), you can re-run the same
+`scale_id` and have the runner only execute the missing work:
+
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --scale-id <scale_id> --resume --tee`
+
+Behavior:
+
+- Local (no dispatch): reads existing `summary_*.csv` under the variant dir and only runs jobs that do **not** have a successful (`exit_code=0`) row.
+- Multi-host dispatch: if the local copied-back host folder already contains a successful run marker (host `aggregate.csv` exists and `remote_run.log` ends with `sweep_rc=0`), that host is skipped.
+
 ### Background (nohup) run
 
 If you want the runner to keep running after you disconnect, use the wrapper script’s `--nohup` mode.

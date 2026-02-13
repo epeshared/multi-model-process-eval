@@ -1191,6 +1191,7 @@ def _dispatch_multi_host(
     tee: bool,
     dry_run: bool,
     remote_clean_repo: bool,
+    resume: bool,
 ) -> int:
     servers = [s for s in (scale.dispatch.servers or []) if str(getattr(s, "host", "")).strip()]
     if not servers:
@@ -1294,6 +1295,28 @@ def _dispatch_multi_host(
         remote_repo_dir = server.remote_repo_dir
         remote_result_root = server.remote_result_root or str(result_root)
         remote_run_dir = f"{remote_result_root.rstrip('/')}/{scale_id}"
+
+        # Resume shortcut: if we already have a successful local copy for this host,
+        # skip remote execution and reuse the existing host aggregate.
+        if resume and not dry_run:
+            local_host_agg = local_host_dir / "aggregate.csv"
+            sweep_rc = _parse_dispatch_sweep_rc(local_host_dir / "remote_run.log")
+            if local_host_agg.exists() and sweep_rc == 0:
+                if tee:
+                    print(f"[resume] host already complete; skipping remote run (host={host})")
+                host_rows = _read_csv_rows(local_host_agg)
+                for r in host_rows:
+                    r2: Dict[str, Any] = dict(r)
+                    r2["server_host"] = host
+                    for k in ["log_path", "metrics_path", "emon_output_path", "emon_summary_xlsx", "emon_process_log"]:
+                        if k in r2:
+                            r2[k] = _rewrite_remote_path_to_local(
+                                val=str(r2.get(k, "")),
+                                remote_run_dir=remote_run_dir,
+                                local_host_dir=local_host_dir,
+                            )
+                    all_rows.append(r2)
+                continue
 
         pre_req_items: List[Tuple[PreRequirement, Path, str]] = []
         for pr in (server.pre_requirements or []):
@@ -1495,6 +1518,7 @@ def _dispatch_multi_host(
             + f"PYTHONUNBUFFERED=1 {server.remote_python} scripts/scale-test/embedding/run_scale_fix_token_len.py "
             + f"--config {shlex.quote(remote_cfg_path)} "
             + "--no-ssh-dispatch "
+            + ("--resume " if resume else "")
             + f"--scale-id {shlex.quote(scale_id)} "
             + f"--result-root {shlex.quote(remote_result_root)} "
             + ("--tee " if tee else "")
@@ -2014,6 +2038,8 @@ def _run_auto_test(
     cpu_expr: str,
     mem_gb: Optional[float],
     stdout_log: Path,
+    only_jobs: Optional[List[str]] = None,
+    skip_jobs: Optional[List[str]] = None,
 ) -> int:
     runner = (REPO_ROOT / "scripts/auto-test/embedding/run_auto_test.py").resolve()
     if not runner.exists():
@@ -2033,6 +2059,16 @@ def _run_auto_test(
         return ["bash", "-lc", script, "bash"] + inner_cmd
 
     cmd = [sys.executable, str(runner), "--config", str(auto_test_config_path)]
+    if only_jobs:
+        for name in only_jobs:
+            n = str(name or "").strip()
+            if n:
+                cmd.extend(["--only", n])
+    if skip_jobs:
+        for name in skip_jobs:
+            n = str(name or "").strip()
+            if n:
+                cmd.extend(["--skip", n])
     if tee:
         cmd.append("--tee")
     if dry_run:
@@ -2094,6 +2130,113 @@ def _iter_summary_rows(summary_csv: Path) -> Iterable[Dict[str, str]]:
         reader = csv.DictReader(f)
         for row in reader:
             yield {k: (v if v is not None else "") for k, v in row.items()}
+
+
+def _iter_summary_csv_paths(result_dir: Path) -> List[Path]:
+    # Auto-test writes summary_<run_id>.csv at the suite root (result_dir).
+    out: List[Path] = []
+    try:
+        for p in result_dir.glob("summary_*.csv"):
+            if p.is_file():
+                out.append(p)
+    except Exception:
+        return []
+    return sorted(out)
+
+
+def _extract_run_id_from_summary_path(p: Path) -> str:
+    # summary_<run_id>.csv
+    name = p.name
+    if not name.startswith("summary_") or not name.endswith(".csv"):
+        return ""
+    return name[len("summary_") : -len(".csv")]
+
+
+def _parse_int(s: Any) -> Optional[int]:
+    try:
+        if s is None:
+            return None
+        ss = str(s).strip()
+        if ss == "":
+            return None
+        return int(float(ss))
+    except Exception:
+        return None
+
+
+def _completed_ok_jobs_from_summaries(result_dir: Path) -> set[str]:
+    ok: set[str] = set()
+    for p in _iter_summary_csv_paths(result_dir):
+        try:
+            for row in _iter_summary_rows(p):
+                job = str(row.get("job_name") or "").strip()
+                if not job:
+                    continue
+                ec = _parse_int(row.get("exit_code"))
+                if ec == 0:
+                    ok.add(job)
+        except Exception:
+            continue
+    return ok
+
+
+def _best_rows_by_job_from_summaries(result_dir: Path) -> Dict[str, Dict[str, str]]:
+    # Choose the latest successful row per job across multiple summary_<run_id>.csv files.
+    # If there is no successful row, fall back to the latest row we saw.
+    best: Dict[str, Tuple[str, bool, Dict[str, str]]] = {}
+    for p in _iter_summary_csv_paths(result_dir):
+        run_id = _extract_run_id_from_summary_path(p)
+        try:
+            for row in _iter_summary_rows(p):
+                job = str(row.get("job_name") or "").strip()
+                if not job:
+                    continue
+                ec = _parse_int(row.get("exit_code"))
+                ok = ec == 0
+
+                prev = best.get(job)
+                if prev is None:
+                    best[job] = (run_id, ok, row)
+                    continue
+
+                prev_run_id, prev_ok, _prev_row = prev
+                # Prefer successful over failed.
+                if prev_ok and not ok:
+                    continue
+                if ok and not prev_ok:
+                    best[job] = (run_id, ok, row)
+                    continue
+                # Same success state: prefer lexicographically latest run_id (UTC compact sorts).
+                if run_id and prev_run_id and run_id > prev_run_id:
+                    best[job] = (run_id, ok, row)
+                elif run_id and not prev_run_id:
+                    best[job] = (run_id, ok, row)
+        except Exception:
+            continue
+
+    return {job: rec[2] for job, rec in best.items()}
+
+
+def _parse_dispatch_sweep_rc(remote_run_log: Path) -> Optional[int]:
+    # Look for the last line like: [dispatch] sweep_rc=0
+    try:
+        if not remote_run_log.exists():
+            return None
+        last_rc: Optional[int] = None
+        with remote_run_log.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "[dispatch] sweep_rc=" not in line:
+                    continue
+                try:
+                    tail = line.strip().split("sweep_rc=", 1)[1]
+                    val = tail.split()[0].strip()
+                    rc = int(val)
+                    last_rc = rc
+                except Exception:
+                    continue
+        return last_rc
+    except Exception:
+        return None
 
 
 def _process_emon_dirs(*, rows: List[Dict[str, Any]], tee: bool, process_cmd: List[str], expected_output: str) -> None:
@@ -2321,6 +2464,11 @@ def main() -> int:
         action="store_true",
         help="Ignore config.run.servers and run locally (useful on remote workers)",
     )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an existing run directory by skipping jobs/hosts already completed successfully",
+    )
     ap.add_argument("--scale-id", default="", help="Override scale_id (default: utc timestamp)")
     ap.add_argument(
         "--result-root",
@@ -2375,6 +2523,7 @@ def main() -> int:
             tee=tee,
             dry_run=bool(args.dry_run),
             remote_clean_repo=_parse_bool(args.remote_clean_repo),
+            resume=bool(args.resume),
         )
 
         # Generate local analysis artifacts for the aggregated run directory so
@@ -2440,6 +2589,14 @@ def main() -> int:
         auto_test_cfg_path = variant_dir / "auto_test_config.generated.json"
         _dump_json(auto_test_cfg_path, auto_test_cfg)
 
+        expected_jobs: List[str] = []
+        try:
+            for j in (auto_test_cfg.get("jobs") or []):
+                if isinstance(j, dict) and str(j.get("name") or "").strip():
+                    expected_jobs.append(str(j.get("name") or "").strip())
+        except Exception:
+            expected_jobs = []
+
         print(f"[info] variant={variant_name}")
         print(f"[info] auto-test config: {auto_test_cfg_path}")
 
@@ -2451,15 +2608,34 @@ def main() -> int:
         if (kv or "").strip():
             print(f"[info] SGLANG_MAX_TOTAL_TOKENS: {kv}")
 
-        rc = _run_auto_test(
-            auto_test_config_path=auto_test_cfg_path,
-            work_dir=REPO_ROOT,
-            tee=tee,
-            dry_run=bool(args.dry_run),
-            cpu_expr=cpu_expr,
-            mem_gb=scale.mem_gb,
-            stdout_log=variant_dir / "auto_test_stdout.log",
-        )
+        if bool(args.resume) and not bool(args.dry_run) and expected_jobs:
+            ok_jobs = _completed_ok_jobs_from_summaries(variant_dir)
+            missing = [j for j in expected_jobs if j not in ok_jobs]
+            if not missing:
+                print(f"[resume] all jobs already complete; skipping runner (variant={variant_name})")
+                rc = 0
+            else:
+                print(f"[resume] running missing jobs: {len(missing)}/{len(expected_jobs)} (variant={variant_name})")
+                rc = _run_auto_test(
+                    auto_test_config_path=auto_test_cfg_path,
+                    work_dir=REPO_ROOT,
+                    tee=tee,
+                    dry_run=bool(args.dry_run),
+                    cpu_expr=cpu_expr,
+                    mem_gb=scale.mem_gb,
+                    stdout_log=variant_dir / "auto_test_stdout.log",
+                    only_jobs=missing,
+                )
+        else:
+            rc = _run_auto_test(
+                auto_test_config_path=auto_test_cfg_path,
+                work_dir=REPO_ROOT,
+                tee=tee,
+                dry_run=bool(args.dry_run),
+                cpu_expr=cpu_expr,
+                mem_gb=scale.mem_gb,
+                stdout_log=variant_dir / "auto_test_stdout.log",
+            )
         if rc != 0:
             print(
                 f"[error] auto-test runner failed (variant={variant_name}, rc={rc}). "
@@ -2473,11 +2649,10 @@ def main() -> int:
 
         summary_found = False
         try:
-            run_id = _find_single_run_id(variant_dir)
-            summary_csv = variant_dir / f"summary_{run_id}.csv"
-            if summary_csv.exists():
+            best_rows = _best_rows_by_job_from_summaries(variant_dir)
+            if best_rows:
                 summary_found = True
-                for row in _iter_summary_rows(summary_csv):
+                for row in best_rows.values():
                     # Pull emon output path from metrics.json (auto-test stores it there).
                     mp = Path(str(row.get("metrics_path") or ""))
                     emon_enabled = ""

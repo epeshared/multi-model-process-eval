@@ -33,6 +33,9 @@ Options:
 	--config <FILE>   Scale-test config JSON (default: config_scale_fix_token_len_amd.json)
 	--nohup           Run in background and write logs under <result_root>/<scale_id>/launcher_logs/
 
+Forwarded runner flags (examples):
+	--resume          Skip jobs/hosts already completed successfully in the same <result_root>/<scale_id>/
+
 Notes:
 	- In --nohup mode, this script auto-chooses --scale-id if you didn't pass one.
 	- To monitor: bash scripts/scale-test/embedding/monitor_scale_fix_token_len.sh --scale-id <scale_id>
