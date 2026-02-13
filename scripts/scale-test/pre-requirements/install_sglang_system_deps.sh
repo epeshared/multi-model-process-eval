@@ -12,6 +12,15 @@ need_paths=(
   "/usr/lib/x86_64-linux-gnu/libtbbmalloc.so.2"
 )
 
+need_bins=(
+  "g++"
+  "gcc"
+  "make"
+  "pkg-config"
+  "numactl"
+  "lsof"
+)
+
 missing=()
 for p in "${need_paths[@]}"; do
   if [[ ! -e "$p" ]]; then
@@ -19,15 +28,26 @@ for p in "${need_paths[@]}"; do
   fi
 done
 
+for b in "${need_bins[@]}"; do
+  if ! command -v "$b" >/dev/null 2>&1; then
+    missing+=("$b")
+  fi
+done
+
 if ((${#missing[@]} == 0)); then
-  echo "[ok] system deps already present (tcmalloc/tbbmalloc)"
+  echo "[ok] system deps already present (tcmalloc/tbbmalloc + build tools)"
   exit 0
 fi
 
 echo "[info] missing system deps: ${missing[*]}"
 
 if [[ $EUID -ne 0 ]]; then
-  echo "[error] install_sglang_system_deps.sh must run as root" >&2
+  if command -v sudo >/dev/null 2>&1; then
+    # Best-effort non-interactive sudo. Most cloud images grant passwordless sudo
+    # to the default user; if not, this will fail fast with a clear error.
+    exec sudo -n bash "$0" "$@"
+  fi
+  echo "[error] install_sglang_system_deps.sh must run as root (or have sudo)" >&2
   exit 1
 fi
 
@@ -64,13 +84,18 @@ if command -v apt-get >/dev/null 2>&1; then
   fi
   # libtcmalloc-minimal4 -> libtcmalloc.so.4
   # libtbbmalloc2        -> libtbbmalloc.so.2
-  # Also install `numactl` + `lsof` which are used for CPU pinning and stale-server cleanup.
-  apt-get install -y --no-install-recommends libtcmalloc-minimal4 libtbbmalloc2 numactl lsof || \
-    apt-get install -y --no-install-recommends libtcmalloc-minimal4 libtbb2 numactl lsof
+  # Also install build tools (g++/make) for sglang-kernel-cpu builds.
+  # And install `numactl` + `lsof` which are used for CPU pinning and stale-server cleanup.
+  apt-get install -y --no-install-recommends \
+    libtcmalloc-minimal4 libtbbmalloc2 numactl lsof \
+    build-essential g++ gcc pkg-config || \
+    apt-get install -y --no-install-recommends \
+      libtcmalloc-minimal4 libtbb2 numactl lsof \
+      build-essential g++ gcc pkg-config
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y gperftools-libs tbb numactl lsof
+  dnf install -y gperftools-libs tbb numactl lsof gcc gcc-c++ make pkgconf-pkg-config
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y gperftools-libs tbb numactl lsof
+  yum install -y gperftools-libs tbb numactl lsof gcc gcc-c++ make pkgconfig
 else
   echo "[error] no supported package manager found (apt-get/dnf/yum)" >&2
   exit 1
@@ -87,6 +112,13 @@ for p in "${need_paths[@]}"; do
   if [[ ! -e "$p" ]]; then
     echo "[error] still missing after install: $p" >&2
     ls -la "$(dirname "$p")" | head -n 50 >&2 || true
+    exit 1
+  fi
+done
+
+for b in "${need_bins[@]}"; do
+  if ! command -v "$b" >/dev/null 2>&1; then
+    echo "[error] still missing after install: $b" >&2
     exit 1
   fi
 done

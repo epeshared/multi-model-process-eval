@@ -21,6 +21,7 @@ set -euo pipefail
 #   DTYPE (default: bfloat16)
 #   USE_AMX (TRUE/1/yes/on to enable)
 #   BASE_URL (default: http://127.0.0.1:30000)
+#   EMBEDDING_HTTP_TIMEOUT (default: 120)      # passed to run_embedding.py --timeout
 #   WARMUP_SAMPLES (default: 1)
 #   PRINT_MODEL_INFO (true/1/yes/on to enable)
 #
@@ -90,6 +91,7 @@ DEVICE=${DEVICE:-cpu}
 DTYPE=${DTYPE:-bfloat16}
 USE_AMX=${USE_AMX:-TRUE}
 BASE_URL=${BASE_URL:-http://127.0.0.1:9090}
+EMBEDDING_HTTP_TIMEOUT=${EMBEDDING_HTTP_TIMEOUT:-120}
 WARMUP_SAMPLES=${WARMUP_SAMPLES:-1}
 PRINT_MODEL_INFO=${PRINT_MODEL_INFO:-0}
 
@@ -221,6 +223,14 @@ if [[ -n "${PROFILE_OUT_NAME}" ]]; then
   fi
 fi
 
+# HTTP timeout for server-backed backends (sglang/vllm-http).
+TIMEOUT_ARG=()
+if [[ -n "${EMBEDDING_HTTP_TIMEOUT:-}" ]]; then
+  if [[ " $* " != *" --timeout "* ]]; then
+    TIMEOUT_ARG=(--timeout "${EMBEDDING_HTTP_TIMEOUT}")
+  fi
+fi
+
 case "${PROFILE_STRICT}" in
   1|true|TRUE|yes|YES|on|ON)
     if [[ " $* " != *" --profile-strict "* ]]; then
@@ -247,6 +257,7 @@ echo "[run_embedding_synth] DEVICE=${DEVICE:-<unset>}"
 echo "[run_embedding_synth] DTYPE=${DTYPE:-<unset>}"
 echo "[run_embedding_synth] USE_AMX=${USE_AMX}"
 echo "[run_embedding_synth] BASE_URL=${BASE_URL:-<unset>}"
+echo "[run_embedding_synth] EMBEDDING_HTTP_TIMEOUT=${EMBEDDING_HTTP_TIMEOUT:-<unset>}"
 echo "[run_embedding_synth] WARMUP_SAMPLES=${WARMUP_SAMPLES}"
 echo "[run_embedding_synth] PRINT_MODEL_INFO=${PRINT_MODEL_INFO}"
 echo "[run_embedding_synth] PROFILE=${PROFILE}"
@@ -286,6 +297,7 @@ python scripts/embedding/run_embedding.py \
   "${WARMUP_ARG[@]}" \
   "${PRINT_MODEL_INFO_ARG[@]}" \
   "${PROFILE_ARGS[@]}" \
+  "${TIMEOUT_ARG[@]}" \
   ${BASE_URL:+--base-url "${BASE_URL}"} \
   ${DEVICE:+--device "${DEVICE}"} \
   ${DTYPE:+--dtype "${DTYPE}"} \

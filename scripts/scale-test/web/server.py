@@ -8,6 +8,7 @@ import io
 import json
 import mimetypes
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -165,7 +167,7 @@ def _list_analysis_files(analysis_dir: Path) -> Tuple[List[Path], List[Path]]:
 
 
 def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
-    """Best-effort extract run metadata (currently: model) for display/filter.
+    """Best-effort extract run metadata for display/filter.
 
     Sources (in priority order):
     - model: run_dir/aggregate.csv (column: model or model_id)
@@ -176,7 +178,33 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
     if cached and cached[0] == run.mtime:
         return cached[1]
 
-    meta: Dict[str, str] = {"model": ""}
+    meta: Dict[str, str] = {"model": "", "cpu": "", "cpu_cores": "", "mode": ""}
+
+    def _cpu_model_from_lscpu_text(s: str) -> str:
+        # Typical line: "Model name:                           Intel(R) Xeon(R) ..."
+        try:
+            for line in (s or "").splitlines():
+                if line.lower().startswith("model name"):
+                    # Split at the first ':'
+                    _, _, tail = line.partition(":")
+                    v = tail.strip()
+                    if v:
+                        return v
+        except Exception:
+            pass
+        return ""
+
+    def _add_cpu_from_lscpu_path(p: Path) -> None:
+        if meta.get("cpu"):
+            return
+        try:
+            if p.exists() and p.is_file():
+                txt = _read_text(p, max_bytes=256_000)
+                v = _cpu_model_from_lscpu_text(txt)
+                if v:
+                    meta["cpu"] = v
+        except Exception:
+            return
 
     # 1) model from aggregate.csv
     try:
@@ -189,6 +217,21 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
                         break
                     m = (r.get("model") or "").strip()
                     mid = (r.get("model_id") or "").strip()
+                    mode = (r.get("mode") or "").strip()
+                    cores = (r.get("resource_cpu_count") or r.get("resource_cpu") or "").strip()
+
+                    if mode and not meta.get("mode"):
+                        meta["mode"] = mode
+
+                    # For cpu_cores, take the max observed across the first rows.
+                    if cores:
+                        try:
+                            c = int(float(cores))
+                            prev = int(meta.get("cpu_cores") or "0") if (meta.get("cpu_cores") or "").isdigit() else 0
+                            if c > prev:
+                                meta["cpu_cores"] = str(c)
+                        except Exception:
+                            pass
                     if m:
                         meta["model"] = m
                         break
@@ -210,6 +253,9 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
             env = (jobs[0].get("env") or {}) if isinstance(jobs[0], dict) else {}
             model2 = str(env.get("MODEL") or "").strip()
             model_id2 = str(env.get("MODEL_ID") or "").strip()
+            mode2 = str(env.get("MODE") or "").strip()
+            if mode2 and not meta.get("mode"):
+                meta["mode"] = mode2
             if not meta.get("model"):
                 if model2:
                     meta["model"] = model2
@@ -240,8 +286,77 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
     except Exception:
         pass
 
+    # 3) CPU model from captured lscpu output.
+    # Prefer per-run server_info for local runs, else per-host server_info.
+    try:
+        _add_cpu_from_lscpu_path(run.run_dir / "server_info" / "lscpu.txt")
+        if not meta.get("cpu"):
+            # Remote dispatch: <run>/hosts/<host>/server_info/lscpu.txt
+            for p in sorted(run.run_dir.glob("hosts/*/server_info/lscpu.txt")):
+                _add_cpu_from_lscpu_path(p)
+                if meta.get("cpu"):
+                    break
+    except Exception:
+        pass
+
     _RUN_META_CACHE[key] = (run.mtime, meta)
     return meta
+
+
+def _apply_home_sort(runs: List[RunInfo], *, sort_spec: str) -> List[RunInfo]:
+    """Stable multi-key sort for the home page.
+
+    sort_spec: comma-separated keys, optionally prefixed with '-'.
+    Supported keys: task, suite, run, model, cpu, mtime
+    Default (empty/invalid): task,suite,run,model,cpu,mtime
+    """
+
+    spec = (sort_spec or "").strip()
+    if not spec:
+        spec = "task,suite,run,model,cpu,mtime"
+
+    items: List[Tuple[str, bool]] = []
+    alias = {
+        "timestamp": "mtime",
+        "time": "mtime",
+        "cpu_model": "cpu",
+        "cpu": "cpu",
+    }
+
+    for raw in [x.strip() for x in spec.split(",") if x.strip()]:
+        desc = raw.startswith("-")
+        k = raw[1:] if desc else raw
+        k = k.strip().lower()
+        k2 = alias.get(k, k)
+        if k2 in {"task", "suite", "run", "model", "cpu", "mtime"}:
+            items.append((k2, desc))
+
+    if not items:
+        items = [("task", False), ("suite", False), ("run", False), ("model", False), ("cpu", False), ("mtime", False)]
+
+    out = list(runs)
+
+    def key_fn(key: str):
+        if key == "task":
+            return lambda r: r.ref.task
+        if key == "suite":
+            return lambda r: r.ref.suite
+        if key == "run":
+            return lambda r: r.ref.run_id
+        if key == "mtime":
+            return lambda r: float(r.mtime or 0.0)
+
+        # meta-backed keys
+        def _meta_get(r: RunInfo) -> str:
+            m = _extract_run_meta(r)
+            return (m.get(key) or "").lower()
+
+        return _meta_get
+
+    # Apply stable sorts from least significant to most significant.
+    for k, desc in reversed(items):
+        out.sort(key=key_fn(k), reverse=bool(desc))
+    return out
 
 
 def _maybe_autogen_analysis(*, scale_test_root: Path, run: RunInfo, required: List[Path]) -> Tuple[bool, str]:
@@ -690,23 +805,36 @@ def _html_page(title: str, body: str) -> str:
 def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[str]]) -> str:
     task_filter = (q.get("task") or [""])[0].strip()
     suite_filter = (q.get("suite") or [""])[0].strip()
+    run_filter = (q.get("run") or [""])[0].strip()
     model_filter = (q.get("model") or [""])[0].strip()
+    cpu_filter = (q.get("cpu") or [""])[0].strip()
+    sort_spec = (q.get("sort") or [""])[0].strip() or "task,suite,run,model,cpu,mtime"
     limit_s = (q.get("limit") or ["50"])[0].strip()
     try:
         limit = max(1, min(500, int(limit_s)))
     except Exception:
         limit = 50
 
+    # Apply sorting before filtering/limit (so pagination/limits make sense).
+    runs2 = _apply_home_sort(runs, sort_spec=sort_spec)
+
     filtered = []
-    for r in runs:
+    for r in runs2:
         if task_filter and r.ref.task != task_filter:
             continue
         if suite_filter and r.ref.suite != suite_filter:
+            continue
+        if run_filter and run_filter.lower() not in r.ref.run_id.lower():
             continue
         if model_filter:
             meta = _extract_run_meta(r)
             m = (meta.get("model") or "").lower()
             if model_filter.lower() not in m:
+                continue
+        if cpu_filter:
+            meta = _extract_run_meta(r)
+            c = (meta.get("cpu") or "").lower()
+            if cpu_filter.lower() not in c:
                 continue
         filtered.append(r)
 
@@ -724,28 +852,78 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
     for r in filtered[:limit]:
         meta = _extract_run_meta(r)
         model = meta.get("model") or "-"
+        cpu = meta.get("cpu") or "-"
         href = f"/run/{_e(r.ref.task)}/{_e(r.ref.suite)}/{_e(r.ref.run_id)}"
+        run_key = f"{r.ref.task}/{r.ref.suite}/{r.ref.run_id}"
         rows.append(
             "<tr>"
+            f"<td><input type=\"checkbox\" name=\"sel\" value=\"{_e(run_key)}\" /></td>"
             f"<td><a href=\"{href}\">{_e(r.ref.task)}</a></td>"
             f"<td>{_e(r.ref.suite)}</td>"
             f"<td><a href=\"{href}\">{_e(r.ref.run_id)}</a></td>"
             f"<td class=\"mono\">{_e(model)}</td>"
+            f"<td class=\"mono\">{_e(cpu)}</td>"
             f"<td class=\"mono\">{_e(_fmt_dt(r.mtime))}</td>"
-            f"<td class=\"mono\">{_e(_safe_relpath(r.analysis_dir, scale_test_root))}</td>"
             "</tr>"
         )
+
+    def _q_href(**updates: str) -> str:
+        # Build a query string preserving current filters but overriding some keys.
+        keep = {
+            "task": task_filter,
+            "suite": suite_filter,
+            "run": run_filter,
+            "model": model_filter,
+            "cpu": cpu_filter,
+            "limit": str(limit),
+        }
+        keep.update({k: v for k, v in updates.items()})
+        parts = []
+        for k, v in keep.items():
+            if v is None:
+                continue
+            vs = str(v).strip()
+            if not vs:
+                continue
+            parts.append(f"{quote(k)}={quote(vs)}")
+        return "/" + ("?" + "&".join(parts) if parts else "")
+
+    sort_bar = (
+        '<div class="sub">'
+        f"Sort: <span class=\"mono\">{_e(sort_spec)}</span> &nbsp;"
+        + f"<a href=\"{_q_href(sort='task,suite,run,model,cpu,mtime')}\">group</a> · "
+        + f"<a href=\"{_q_href(sort='task')}\">task↑</a> · <a href=\"{_q_href(sort='-task')}\">task↓</a> · "
+        + f"<a href=\"{_q_href(sort='suite')}\">suite↑</a> · <a href=\"{_q_href(sort='-suite')}\">suite↓</a> · "
+        + f"<a href=\"{_q_href(sort='-mtime')}\">time↓</a> · <a href=\"{_q_href(sort='mtime')}\">time↑</a> · "
+        + f"<a href=\"{_q_href(sort='model')}\">model↑</a> · <a href=\"{_q_href(sort='-model')}\">model↓</a> · "
+        + f"<a href=\"{_q_href(sort='cpu')}\">cpu↑</a> · <a href=\"{_q_href(sort='-cpu')}\">cpu↓</a>"
+        + "</div>"
+    )
+
+    deleted_n = (q.get("deleted") or [""])[0].strip()
+    failed_n = (q.get("delete_failed") or [""])[0].strip()
+    delete_msg = ""
+    if deleted_n.isdigit():
+        msg = f"Deleted {int(deleted_n)} run(s)."
+        if failed_n.isdigit() and int(failed_n) > 0:
+            msg += f" Failed: {int(failed_n)}."
+        delete_msg = f'<div class="sub warn">{_e(msg)}</div>'
 
     body = f"""
 <section class="card">
   <h1>Scale Test Results</h1>
   <div class="sub">Root: <span class="mono">{_e(scale_test_root)}</span></div>
+    {delete_msg}
+  {sort_bar}
 
   <div class="toolbar">
     <form method="get" action="/" class="form-inline">
       <label>task <input name="task" value="{_e(task_filter)}" placeholder="embedding / vl / omni" /></label>
       <label>suite <input name="suite" value="{_e(suite_filter)}" placeholder="fix_token_len" /></label>
+            <label>run <input name="run" value="{_e(run_filter)}" placeholder="20260210T..." /></label>
             <label>model <input name="model" value="{_e(model_filter)}" placeholder="qwen3-embedding-4b / Qwen3-Embedding-4B" /></label>
+            <label>cpu <input name="cpu" value="{_e(cpu_filter)}" placeholder="Xeon / EPYC" /></label>
+            <label>sort <input name="sort" value="{_e(sort_spec)}" placeholder="task,suite,run,model,cpu,mtime" size="30" /></label>
       <label>limit <input name="limit" value="{_e(limit)}" size="4" /></label>
       <button type="submit">Filter</button>
       <a class="btn" href="/">Reset</a>
@@ -757,28 +935,161 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
 
 <section class="card">
   <h2>Recent Runs</h2>
-  <table class="table">
-    <thead>
-      <tr>
-        <th>task</th>
-        <th>suite</th>
-        <th>run</th>
-                <th>model</th>
-        <th>mtime</th>
-        <th>analysis dir</th>
-      </tr>
-    </thead>
-    <tbody>
-      {''.join(rows) if rows else '<tr><td colspan="5" class="muted">No runs found.</td></tr>'}
-    </tbody>
-  </table>
+    <div class="sub">Select any two runs (checkbox left of task), then click <span class="mono">Compare selected</span>.</div>
+    <form method="get" action="/compare">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th></th>
+                    <th>task</th>
+                    <th>suite</th>
+                    <th>run</th>
+                    <th>model</th>
+                    <th>cpu</th>
+                    <th>mtime</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(rows) if rows else '<tr><td colspan="7" class="muted">No runs found.</td></tr>'}
+            </tbody>
+        </table>
+        <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <button type="submit">Compare selected</button>
+            <button
+              type="submit"
+              class="danger"
+              formaction="/delete"
+              formmethod="post"
+              onclick="return confirm('Delete selected runs? This cannot be undone.');"
+            >Delete selected</button>
+        </div>
+    </form>
 </section>
 """
     return _html_page("Scale Test Results", body)
 
 
+def _pick_lines(text: str, *, keep_prefixes: Iterable[str], max_lines: int = 32) -> str:
+    prefixes = [str(p).lower() for p in keep_prefixes]
+    out: List[str] = []
+    for line in (text or "").splitlines():
+        low = line.strip().lower()
+        if not low:
+            continue
+        for p in prefixes:
+            if low.startswith(p):
+                out.append(line.rstrip())
+                break
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
+def _render_server_info_brief(run: RunInfo) -> str:
+    hosts = _list_server_info_hosts(run)
+    if not hosts:
+        return '<div class="muted">No server_info found for this run.</div>'
+
+    blocks: List[str] = []
+    for it in hosts:
+        tag = str(it.get("tag") or "")
+        label = str(it.get("label") or tag or "host")
+        base_rel = str(it.get("base_rel") or "")
+        lscpu = (run.run_dir / base_rel / "lscpu.txt").resolve()
+        if not (_is_within(lscpu, run.run_dir) and lscpu.exists() and lscpu.is_file()):
+            blocks.append(f'<div class="muted">{_e(label)}: missing lscpu.txt</div>')
+            continue
+
+        raw = _read_text(lscpu, max_bytes=256_000)
+        picked = _pick_lines(
+            raw,
+            keep_prefixes=(
+                "Architecture:",
+                "Model name:",
+                "CPU(s):",
+                "Thread(s) per core:",
+                "Core(s) per socket:",
+                "Socket(s):",
+                "NUMA node(s):",
+                "NUMA node0 CPU(s):",
+                "NUMA node1 CPU(s):",
+                "NUMA node2 CPU(s):",
+                "NUMA node3 CPU(s):",
+            ),
+            max_lines=48,
+        )
+        if not picked:
+            picked = "\n".join((raw or "").splitlines()[:24])
+
+        host_hdr = "" if len(hosts) == 1 else f'<div class="sub"><span class="mono">{_e(label)}</span></div>'
+        blocks.append(
+            host_hdr
+            + f'<pre class="mono" style="white-space: pre-wrap; margin: 8px 0 0 0;">{_e(picked)}</pre>'
+        )
+
+    return "".join(blocks)
+
+
+def _render_cpu_info_brief(run: RunInfo) -> str:
+    """Render a CPU-focused excerpt from server_info/lscpu.txt.
+
+    For multi-host runs, shows one block per host.
+    """
+
+    hosts = _list_server_info_hosts(run)
+    if not hosts:
+        return '<div class="muted">No server_info found for this run.</div>'
+
+    blocks: List[str] = []
+    for it in hosts:
+        tag = str(it.get("tag") or "")
+        label = str(it.get("label") or tag or "host")
+        base_rel = str(it.get("base_rel") or "")
+        lscpu = (run.run_dir / base_rel / "lscpu.txt").resolve()
+        if not (_is_within(lscpu, run.run_dir) and lscpu.exists() and lscpu.is_file()):
+            blocks.append(f'<div class="muted">{_e(label)}: missing lscpu.txt</div>')
+            continue
+
+        raw = _read_text(lscpu, max_bytes=256_000)
+        picked = _pick_lines(
+            raw,
+            keep_prefixes=(
+                "Architecture:",
+                "Model name:",
+                "CPU(s):",
+                "Thread(s) per core:",
+                "Core(s) per socket:",
+                "Socket(s):",
+                "NUMA node(s):",
+            ),
+            max_lines=24,
+        )
+        if not picked:
+            picked = "\n".join((raw or "").splitlines()[:16])
+
+        host_hdr = "" if len(hosts) == 1 else f'<div class="sub"><span class="mono">{_e(label)}</span></div>'
+        blocks.append(
+            host_hdr
+            + f'<pre class="mono" style="white-space: pre-wrap; margin: 8px 0 0 0;">{_e(picked)}</pre>'
+        )
+
+    return "".join(blocks)
+
+
 def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) -> str:
     _, csvs = _list_analysis_files(run.analysis_dir)
+
+    meta = _extract_run_meta(run)
+    model = meta.get("model") or "-"
+    cpu = meta.get("cpu") or "-"
+
+    run_key = f"{run.ref.task}/{run.ref.suite}/{run.ref.run_id}"
+    compare_bar = (
+        '<div class="sub">Compare: '
+        f'<a class="btn" href="/compare?a={quote(run_key)}">Set as A</a> '
+        f'<a class="btn" href="/compare?b={quote(run_key)}">Set as B</a>'
+        "</div>"
+    )
 
     # Auto-generate summary if missing.
     summary_path = (run.analysis_dir / "run_summary.html").resolve()
@@ -824,10 +1135,12 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
   </div>
 
   <h1>{_e(title)}</h1>
+    <div class="sub">model: <span class="mono">{_e(model)}</span></div>
+    <div class="sub">cpu: <span class="mono">{_e(cpu)}</span></div>
   <div class="sub">mtime: <span class="mono">{_e(_fmt_dt(run.mtime))}</span></div>
   <div class="sub">run_dir: <span class="mono">{_e(run.run_dir)}</span></div>
-  <div class="sub">analysis_dir: <span class="mono">{_e(run.analysis_dir)}</span></div>
     <div class="sub">server info: <a href="{server_info_href}">View</a></div>
+    {compare_bar}
 </section>
 
 <section class="card">
@@ -846,6 +1159,540 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
 </section>
 """
     return _html_page(title, body)
+
+
+def _parse_run_key(s: str) -> Optional[RunRef]:
+    raw = (s or "").strip()
+    if not raw:
+        return None
+    # Accept either task/suite/run or task|suite|run
+    if "|" in raw:
+        parts = [p.strip() for p in raw.split("|") if p.strip()]
+    else:
+        parts = [p.strip() for p in raw.split("/") if p.strip()]
+    if len(parts) != 3:
+        return None
+    return RunRef(task=parts[0], suite=parts[1], run_id=parts[2])
+
+
+def _try_float(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _cmp_pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    if b == 0.0:
+        if a == 0.0:
+            return 0.0
+        return float("inf")
+    return (a / b - 1.0) * 100.0
+
+
+def _fmt_pct(v: Optional[float]) -> str:
+    if v is None:
+        return "-"
+    if v == float("inf"):
+        return "inf"
+    if v == float("-inf"):
+        return "-inf"
+    try:
+        return f"{v:+.2f}%"
+    except Exception:
+        return str(v)
+
+
+def _read_csv_dict_rows(path: Path, *, max_rows: int = 50_000) -> Tuple[List[str], List[Dict[str, str]]]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = [c for c in (reader.fieldnames or [])]
+        rows: List[Dict[str, str]] = []
+        for i, r in enumerate(reader):
+            if i >= max_rows:
+                break
+            rows.append({k: ("" if v is None else str(v)) for k, v in r.items()})
+    return fieldnames, rows
+
+
+def _compare_csv_tables(
+    *,
+    a_path: Path,
+    b_path: Path,
+    max_out_rows: int = 200,
+    cell_view: str = "pct",
+) -> str:
+    if not a_path.exists() and not b_path.exists():
+        return '<div class="muted">Missing in both A and B.</div>'
+    if not a_path.exists():
+        return '<div class="warn">Missing in A.</div>'
+    if not b_path.exists():
+        return '<div class="warn">Missing in B.</div>'
+
+    a_cols, a_rows = _read_csv_dict_rows(a_path)
+    b_cols, b_rows = _read_csv_dict_rows(b_path)
+    cols = [c for c in a_cols if c in set(b_cols)]
+    if not cols:
+        cols = list(dict.fromkeys(a_cols + b_cols))
+
+    dim_force = {
+        "variant",
+        "resource_cpu",
+        "resource_cpu_count",
+        "resource_mem_gb",
+        "cpu_count",
+        "batch_size",
+        "token_len",
+        "kv_cap",
+        "sglang_max_total_tokens",
+    }
+
+    def is_numeric_col(name: str) -> bool:
+        vs: List[str] = []
+        for r in a_rows[:200]:
+            v = r.get(name, "")
+            if v:
+                vs.append(v)
+        for r in b_rows[:200]:
+            v = r.get(name, "")
+            if v:
+                vs.append(v)
+        if not vs:
+            return False
+        ok = 0
+        for v in vs:
+            if _try_float(v) is not None:
+                ok += 1
+        return (ok / max(1, len(vs))) >= 0.85
+
+    numeric_cols = {c for c in cols if is_numeric_col(c)}
+
+    # Metrics: numeric columns that are not part of the known dimensions.
+    # (We intentionally include e.g. *_per_cpu columns; the old regex-based filter
+    # missed these and caused them to be treated as keys.)
+    metrics = [c for c in cols if (c in numeric_cols and c not in dim_force)]
+
+    # Key columns should be stable across runs; drop volatile columns that contain
+    # file paths / logs / artifacts (these differ even when the measurement point is the same).
+    candidate_key_cols = [c for c in cols if c not in set(metrics)]
+
+    volatile_name_re = re.compile(
+        r"(path|file|dir|folder|artifact|output|stdout|stderr|log|xlsx|html|json|csv)$",
+        re.IGNORECASE,
+    )
+    volatile_exact = {
+        "emon_summary_xlsx",
+        "auto_test_stdout_log",
+        "auto_test_stderr_log",
+        "run_dir",
+        "run_path",
+        "summary_xlsx",
+    }
+
+    def looks_like_path(v: str) -> bool:
+        s = (v or "").strip()
+        if not s:
+            return False
+        # absolute/relative paths, urls, or obvious file extensions
+        if "/" in s or "\\" in s or s.startswith("http://") or s.startswith("https://"):
+            return True
+        lower = s.lower()
+        return any(lower.endswith(ext) for ext in (".xlsx", ".csv", ".json", ".html", ".log", ".txt", ".png"))
+
+    def is_volatile_key_col(name: str) -> bool:
+        n = (name or "").strip()
+        if not n:
+            return True
+        if n in volatile_exact:
+            return True
+        if volatile_name_re.search(n):
+            return True
+        # If most values look like paths, treat as volatile.
+        sample: List[str] = []
+        for r in a_rows[:200]:
+            v = (r.get(n) or "").strip()
+            if v:
+                sample.append(v)
+        for r in b_rows[:200]:
+            v = (r.get(n) or "").strip()
+            if v:
+                sample.append(v)
+        if not sample:
+            return False
+        pathish = sum(1 for v in sample if looks_like_path(v))
+        return (pathish / max(1, len(sample))) >= 0.60
+
+    key_cols = [c for c in candidate_key_cols if not is_volatile_key_col(c)]
+    if not key_cols:
+        # Fallback: keep original candidate keys if everything was filtered.
+        key_cols = candidate_key_cols
+
+    def row_key(r: Dict[str, str], *, i: int) -> Tuple[str, ...]:
+        if not key_cols:
+            return (str(i),)
+        return tuple((r.get(c, "") or "").strip() for c in key_cols)
+
+    a_idx: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    for i, r in enumerate(a_rows):
+        a_idx[row_key(r, i=i)] = r
+    b_idx: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    for i, r in enumerate(b_rows):
+        b_idx[row_key(r, i=i)] = r
+
+    keys = sorted(set(a_idx.keys()) | set(b_idx.keys()))
+    if not metrics:
+        return '<div class="muted">No numeric metric columns detected; nothing to compute (A/B-1).</div>'
+
+    view = (cell_view or "").strip().lower()
+    if view not in {"pct", "full", "abdelta"}:
+        view = "pct"
+
+    def _fmt_raw_cell(v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            return "-"
+        fv = _try_float(s)
+        if fv is None:
+            return s if len(s) <= 64 else (s[:61] + "...")
+        try:
+            return f"{float(fv):.6g}"
+        except Exception:
+            return s
+
+    if view == "pct":
+        metric_heads = "".join(f"<th class=\"mono\">{_e(c)} %</th>" for c in metrics)
+    elif view == "abdelta":
+        metric_heads = "".join(
+            f"<th class=\"mono\">A_{_e(c)}</th>"
+            f"<th class=\"mono\">B_{_e(c)}</th>"
+            f"<th class=\"mono\">delta_{_e(c)}%</th>"
+            for c in metrics
+        )
+    else:
+        metric_heads = "".join(f"<th class=\"mono\">{_e(c)}</th>" for c in metrics)
+    head = "<tr>" + "".join(f"<th>{_e(c)}</th>" for c in key_cols) + metric_heads + "</tr>"
+
+    body_rows: List[str] = []
+
+    def _fmt_delta_abdelta(a: Optional[float], b: Optional[float]) -> str:
+        """Format delta for the abdelta view.
+
+        - If A >= B and B > 0: show ratio as "{A/B}×" ("提升了多少倍").
+        - If A < B: show percent drop as a negative percent (same as (A/B-1)*100%).
+        - Otherwise fall back to percent formatting.
+        """
+
+        if a is None or b is None:
+            return "-"
+        if b == 0.0:
+            if a == 0.0:
+                return "1×"
+            return "inf×"
+
+        # Only use the "times" representation for positive baselines.
+        if b > 0.0 and a >= b and a >= 0.0:
+            try:
+                return f"{(a / b):.6g}×"
+            except Exception:
+                pass
+        return _fmt_pct(_cmp_pct(a, b))
+
+    for k in keys[:max_out_rows]:
+        ar = a_idx.get(k) or {}
+        br = b_idx.get(k) or {}
+        tds = []
+        for j, c in enumerate(key_cols):
+            v = k[j] if j < len(k) else ""
+            tds.append(f"<td>{_e(v)}</td>")
+        for c in metrics:
+            a_raw = (ar.get(c, "") or "").strip()
+            b_raw = (br.get(c, "") or "").strip()
+            av = _try_float(a_raw)
+            bv = _try_float(b_raw)
+
+            pct_ab = _cmp_pct(av, bv)
+            pct_ba = _cmp_pct(bv, av)
+
+            if view == "abdelta":
+                a_disp = _fmt_raw_cell(a_raw)
+                b_disp = _fmt_raw_cell(b_raw)
+
+                ratio_ab = None
+                try:
+                    if av is not None and bv is not None and bv != 0.0:
+                        ratio_ab = av / bv
+                except Exception:
+                    ratio_ab = None
+
+                ratio_str = "-"
+                if ratio_ab == float("inf"):
+                    ratio_str = "inf"
+                elif ratio_ab == float("-inf"):
+                    ratio_str = "-inf"
+                elif ratio_ab is not None:
+                    try:
+                        ratio_str = f"{float(ratio_ab):.6g}"
+                    except Exception:
+                        ratio_str = str(ratio_ab)
+
+                title = (
+                    f"A={a_raw}  B={b_raw}  "
+                    f"ratio(A/B)={ratio_str}  "
+                    f"delta(A/B-1)={_fmt_pct(pct_ab)}  delta(B/A-1)={_fmt_pct(pct_ba)}"
+                )
+                tds.append(f"<td class=\"mono\" title=\"{_e(title)}\">{_e(a_disp)}</td>")
+                tds.append(f"<td class=\"mono\" title=\"{_e(title)}\">{_e(b_disp)}</td>")
+                tds.append(f"<td class=\"mono\" title=\"{_e(title)}\">{_e(_fmt_delta_abdelta(av, bv))}</td>")
+            elif view == "full":
+                a_disp = _fmt_raw_cell(a_raw)
+                b_disp = _fmt_raw_cell(b_raw)
+                title = (
+                    f"A={a_raw}  B={b_raw}  "
+                    f"(A/B-1)={_fmt_pct(pct_ab)}  (B/A-1)={_fmt_pct(pct_ba)}"
+                )
+                cell = (
+                    f'<div class="mono">A={_e(a_disp)} '
+                    f'<span class="muted">{_e(_fmt_pct(pct_ab))}</span></div>'
+                    f'<div class="mono">B={_e(b_disp)} '
+                    f'<span class="muted">{_e(_fmt_pct(pct_ba))}</span></div>'
+                )
+                tds.append(f"<td title=\"{_e(title)}\">{cell}</td>")
+            else:
+                title = f"A={a_raw}  B={b_raw}"
+                tds.append(f"<td class=\"mono\" title=\"{_e(title)}\">{_e(_fmt_pct(pct_ab))}</td>")
+        body_rows.append("<tr>" + "".join(tds) + "</tr>")
+
+    more = ""
+    if len(keys) > max_out_rows:
+        more = f'<div class="muted">Showing first {max_out_rows} of {len(keys)} rows.</div>'
+
+    return (
+        '<div class="table-scroll csv-compare-scroll">'
+        f'<table class="table small"><thead>{head}</thead><tbody>{"".join(body_rows)}</tbody></table>'
+        "</div>"
+        + more
+    )
+
+
+def _render_compare(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[str]]) -> str:
+    a_raw = (q.get("a") or [""])[0].strip()
+    b_raw = (q.get("b") or [""])[0].strip()
+
+    # Allow selecting from homepage checkboxes: /compare?sel=...&sel=...
+    sels = [str(s).strip() for s in (q.get("sel") or []) if str(s).strip()]
+    sel_warn = ""
+    if sels and (not a_raw or not b_raw):
+        if not a_raw and len(sels) >= 1:
+            a_raw = sels[0]
+        if not b_raw and len(sels) >= 2:
+            b_raw = sels[1]
+        if len(sels) > 2:
+            sel_warn = '<div class="warn">More than 2 runs selected; using the first two.</div>'
+
+    a_ref = _parse_run_key(a_raw)
+    b_ref = _parse_run_key(b_raw)
+
+    options: List[Tuple[str, str]] = []
+    for r in runs:
+        meta = _extract_run_meta(r)
+        model = meta.get("model") or "-"
+        cpu = meta.get("cpu") or "-"
+        key = f"{r.ref.task}/{r.ref.suite}/{r.ref.run_id}"
+        label = f"{key}  |  {model}  |  {cpu}  |  {_fmt_dt(r.mtime)}"
+        options.append((key, label))
+
+    def sel(name: str, chosen: str) -> str:
+        opts = ['<option value="">(select)</option>']
+        for key, label in options:
+            s = " selected" if chosen and key == chosen else ""
+            opts.append(f'<option value="{_e(key)}"{s}>{_e(label)}</option>')
+        return f'<select name="{_e(name)}">' + "".join(opts) + "</select>"
+
+    form = (
+        '<section class="card">'
+        '<h1>Compare Runs</h1>'
+        '<div class="sub">Pick A/B → see server info → click a CSV to compare it.</div>'
+        '<div class="sub">Per-cell percent: <span class="mono">(A/B - 1) * 100%</span>. Hover a cell to see raw A/B.</div>'
+        '<form method="get" action="/compare" class="form-inline">'
+        f'<label>A {sel("a", a_raw)}</label>'
+        f'<label>B {sel("b", b_raw)}</label>'
+        '<button type="submit">Go</button>'
+        '<a class="btn" href="/compare">Reset</a>'
+        '</form>'
+        f'{sel_warn}'
+        '</section>'
+    )
+
+    if not (a_ref and b_ref):
+        return _html_page("Compare Runs", form)
+
+    run_a = next((r for r in runs if r.ref == a_ref), None)
+    run_b = next((r for r in runs if r.ref == b_ref), None)
+    if run_a is None or run_b is None:
+        warn = '<section class="card"><div class="warn">Invalid A/B selection (run not found or missing analysis/).</div></section>'
+        return _html_page("Compare Runs", form + warn)
+
+    _, a_csvs = _list_analysis_files(run_a.analysis_dir)
+    _, b_csvs = _list_analysis_files(run_b.analysis_dir)
+    a_map = {p.name: p for p in a_csvs}
+    b_map = {p.name: p for p in b_csvs}
+    names = sorted(set(a_map.keys()) | set(b_map.keys()))
+
+    a_href = f"/run/{_e(run_a.ref.task)}/{_e(run_a.ref.suite)}/{_e(run_a.ref.run_id)}"
+    b_href = f"/run/{_e(run_b.ref.task)}/{_e(run_b.ref.suite)}/{_e(run_b.ref.run_id)}"
+    a_si = f"/server-info/{_e(run_a.ref.task)}/{_e(run_a.ref.suite)}/{_e(run_a.ref.run_id)}"
+    b_si = f"/server-info/{_e(run_b.ref.task)}/{_e(run_b.ref.suite)}/{_e(run_b.ref.run_id)}"
+
+    header = (
+        '<section class="card">'
+        '<h2>Selection</h2>'
+        f'<div class="sub">A: <a class="mono" href="{a_href}">{_e(a_raw)}</a> · <a href="{a_si}">server info</a></div>'
+        f'<div class="sub">B: <a class="mono" href="{b_href}">{_e(b_raw)}</a> · <a href="{b_si}">server info</a></div>'
+        '</section>'
+    )
+
+    view = (q.get("view") or [""])[0].strip().lower()
+    if view == "all":
+        blocks: List[str] = []
+        for name in names:
+            a_p = a_map.get(name, Path("/dev/null"))
+            b_p = b_map.get(name, Path("/dev/null"))
+            table = _compare_csv_tables(a_path=a_p, b_path=b_p, max_out_rows=200, cell_view="pct")
+            blocks.append(
+                '<section class="card">'
+                f'<details open><summary><span class="mono">{_e(name)}</span></summary>'
+                f'{table}'
+                '</details>'
+                '</section>'
+            )
+        return _html_page("Compare Runs", form + header + "".join(blocks))
+
+    server_infos = (
+        '<section class="card">'
+        '<h2>Server Info</h2>'
+        '<div class="plots">'
+        f'<div class="plot"><div class="plot-title">A</div>{_render_server_info_brief(run_a)}</div>'
+        f'<div class="plot"><div class="plot-title">B</div>{_render_server_info_brief(run_b)}</div>'
+        '</div>'
+        '</section>'
+    )
+
+    csv_links: List[str] = []
+    for name in names:
+        have_a = name in a_map
+        have_b = name in b_map
+        missing = ""
+        if not have_a:
+            missing += ' <span class="warn">(missing A)</span>'
+        if not have_b:
+            missing += ' <span class="warn">(missing B)</span>'
+        href = f"/compare-csv?a={quote(a_raw)}&b={quote(b_raw)}&csv={quote(name)}"
+        csv_links.append(f'<div><a class="mono" href="{href}">{_e(name)}</a>{missing}</div>')
+
+    csv_list = (
+        '<section class="card">'
+        '<h2>CSV Files</h2>'
+        '<div class="sub">Click a CSV to open the CSV comparison page.</div>'
+        '<div style="margin-top: 10px;">'
+        + "".join(csv_links)
+        + '</div>'
+        '</section>'
+    )
+
+    all_href = f"/compare?a={quote(a_raw)}&b={quote(b_raw)}&view=all"
+    hint = (
+        '<section class="card">'
+        f'<div class="sub">Need the old all-in-one view? <a href="{all_href}">View all comparisons</a></div>'
+        '</section>'
+    )
+
+    return _html_page("Compare Runs", form + header + server_infos + csv_list + hint)
+
+
+def _render_compare_csv(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[str]]) -> str:
+    a_raw = (q.get("a") or [""])[0].strip()
+    b_raw = (q.get("b") or [""])[0].strip()
+    csv_name = (q.get("csv") or [""])[0].strip()
+
+    a_ref = _parse_run_key(a_raw)
+    b_ref = _parse_run_key(b_raw)
+    if not (a_ref and b_ref and csv_name):
+        warn = '<section class="card"><div class="warn">Missing parameters. Need: a, b, csv.</div></section>'
+        back = '<section class="card"><a class="btn" href="/compare">Back</a></section>'
+        return _html_page("Compare CSV", warn + back)
+
+    run_a = next((r for r in runs if r.ref == a_ref), None)
+    run_b = next((r for r in runs if r.ref == b_ref), None)
+    if run_a is None or run_b is None:
+        warn = '<section class="card"><div class="warn">Invalid A/B selection (run not found or missing analysis/).</div></section>'
+        back = f'<section class="card"><a class="btn" href="/compare?a={quote(a_raw)}&b={quote(b_raw)}">Back</a></section>'
+        return _html_page("Compare CSV", warn + back)
+
+    _, a_csvs = _list_analysis_files(run_a.analysis_dir)
+    _, b_csvs = _list_analysis_files(run_b.analysis_dir)
+    a_map = {p.name: p for p in a_csvs}
+    b_map = {p.name: p for p in b_csvs}
+
+    a_p = a_map.get(csv_name, Path("/dev/null"))
+    b_p = b_map.get(csv_name, Path("/dev/null"))
+    table = _compare_csv_tables(a_path=a_p, b_path=b_p, max_out_rows=400, cell_view="abdelta")
+
+    back_href = f"/compare?a={quote(a_raw)}&b={quote(b_raw)}"
+    a_href = f"/run/{_e(run_a.ref.task)}/{_e(run_a.ref.suite)}/{_e(run_a.ref.run_id)}"
+    b_href = f"/run/{_e(run_b.ref.task)}/{_e(run_b.ref.suite)}/{_e(run_b.ref.run_id)}"
+
+    swap_href = f"/compare-csv?a={quote(b_raw)}&b={quote(a_raw)}&csv={quote(csv_name)}"
+
+    a_meta = _extract_run_meta(run_a)
+    b_meta = _extract_run_meta(run_b)
+    a_cpu = a_meta.get("cpu") or "-"
+    b_cpu = b_meta.get("cpu") or "-"
+    a_cores = a_meta.get("cpu_cores") or ""
+    b_cores = b_meta.get("cpu_cores") or ""
+    a_cores_txt = f" ({a_cores} cores)" if a_cores else ""
+    b_cores_txt = f" ({b_cores} cores)" if b_cores else ""
+
+    cpu_info = (
+        '<section class="card">'
+        '<h2>CPU Info</h2>'
+        '<div class="plots">'
+        f'<div class="plot"><div class="plot-title">A · {_e(a_cpu)}{_e(a_cores_txt)}</div>{_render_cpu_info_brief(run_a)}</div>'
+        f'<div class="plot"><div class="plot-title">B · {_e(b_cpu)}{_e(b_cores_txt)}</div>{_render_cpu_info_brief(run_b)}</div>'
+        '</div>'
+        '</section>'
+    )
+
+    body = (
+        '<section class="card">'
+        '<div class="breadcrumbs">'
+        f'<a href="/">Home</a><span class="sep">/</span>'
+        f'<a href="{back_href}">Compare</a><span class="sep">/</span>'
+        f'<span class="mono">{_e(csv_name)}</span>'
+        '</div>'
+        f'<h1><span class="mono">{_e(csv_name)}</span></h1>'
+        f'<div style="margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">'
+        f'<a class="btn" href="{back_href}">Back to CSV list</a>'
+        f'<a class="btn" href="{swap_href}">Swap A/B</a>'
+        '</div>'
+        f'<div class="sub">A cpu: <span class="mono">{_e(a_cpu)}{_e(a_cores_txt)}</span></div>'
+        f'<div class="sub">B cpu: <span class="mono">{_e(b_cpu)}{_e(b_cores_txt)}</span></div>'
+        f'<div class="sub">A: <a class="mono" href="{a_href}">{_e(a_raw)}</a></div>'
+        f'<div class="sub">B: <a class="mono" href="{b_href}">{_e(b_raw)}</a></div>'
+        '<div class="sub">Metrics are expanded into <span class="mono">A_*</span>, <span class="mono">B_*</span>, and <span class="mono">delta_*%</span>. For <span class="mono">delta_*%</span>: when <span class="mono">A ≥ B</span> (and <span class="mono">B &gt; 0</span>) it shows the ratio <span class="mono">A/B</span> as <span class="mono">×</span> ("how many times"); when <span class="mono">A &lt; B</span> it shows the percent drop <span class="mono">(A/B - 1) * 100%</span>.</div>'
+        '</section>'
+        f'{cpu_info}'
+        '<section class="card">'
+        f'{table}'
+        '</section>'
+    )
+    return _html_page("Compare CSV", body)
 
 
 def _list_server_info_hosts(run: RunInfo) -> List[Dict[str, str]]:
@@ -1488,6 +2335,12 @@ def _is_within(path: Path, root: Path) -> bool:
 class Handler(BaseHTTPRequestHandler):
     server_version = "scale-test-web/0.1"
 
+    def do_POST(self) -> None:  # noqa: N802
+        try:
+            self._do_POST()
+        except Exception as e:
+            self._send(500, f"Internal error: {e}\n", content_type="text/plain")
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._do_GET()
@@ -1503,6 +2356,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "":
             runs = discover_runs(srv.scale_test_root)
             html_text = _render_home(srv.scale_test_root, runs, q)
+            self._send(200, html_text, content_type="text/html; charset=utf-8")
+            return
+
+        if path == "/compare":
+            runs = discover_runs(srv.scale_test_root)
+            html_text = _render_compare(srv.scale_test_root, runs, q)
+            self._send(200, html_text, content_type="text/html; charset=utf-8")
+            return
+
+        if path == "/compare-csv":
+            runs = discover_runs(srv.scale_test_root)
+            html_text = _render_compare_csv(srv.scale_test_root, runs, q)
             self._send(200, html_text, content_type="text/html; charset=utf-8")
             return
 
@@ -1603,6 +2468,57 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_file(file_path, download_name=safe_name)
             else:
                 self._send_file(file_path)
+            return
+
+        self._send(404, "Not Found\n", content_type="text/plain")
+
+    def _do_POST(self) -> None:
+        srv: "WebServer" = self.server  # type: ignore[assignment]
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            form = parse_qs(raw.decode("utf-8", errors="replace"))
+        except Exception:
+            form = {}
+
+        if path == "/delete":
+            sels = [s for s in (form.get("sel") or []) if str(s).strip()]
+
+            deleted = 0
+            failed = 0
+            for run_key in sels:
+                parts = [p for p in str(run_key).split("/") if p]
+                if len(parts) != 3:
+                    failed += 1
+                    continue
+                task, suite, run_id = parts
+
+                # Match WebServer.get_run() layout.
+                run_dir = (srv.scale_test_root / task / "result" / suite / run_id).resolve()
+                analysis_dir = run_dir / "analysis"
+                if not _is_within(run_dir, srv.scale_test_root):
+                    failed += 1
+                    continue
+                if not run_dir.exists() or not run_dir.is_dir():
+                    failed += 1
+                    continue
+                # Only delete runs that look like runs (analysis dir exists).
+                if not analysis_dir.exists():
+                    failed += 1
+                    continue
+                try:
+                    shutil.rmtree(run_dir)
+                    deleted += 1
+                except Exception:
+                    failed += 1
+
+            # Redirect back to home.
+            self.send_response(303)
+            self.send_header("Location", f"/?deleted={deleted}&delete_failed={failed}")
+            self.end_headers()
             return
 
         self._send(404, "Not Found\n", content_type="text/plain")

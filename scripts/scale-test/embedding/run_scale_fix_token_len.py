@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import socket
 import shlex
 import shutil
 import subprocess
@@ -316,7 +317,7 @@ class ScaleConfig:
     dispatch: SSHDispatchConfig
 
 
-def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
+def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -> ScaleConfig:
     raw = _load_json(cfg_path)
     template = Path(str(raw.get("template_auto_test_config") or "scripts/auto-test/embedding/config_fix_token_len.json"))
     if not template.is_absolute():
@@ -403,6 +404,81 @@ def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
     ssh_identity_file_default = str(ssh.get("identity_file") or "").strip()
     ssh_options_default = _as_str_list(ssh.get("options"))
 
+    password_file_default_raw = str(ssh.get("password_file") or run.get("password_file") or "").strip()
+    password_file_default: Optional[Path] = None
+    if password_file_default_raw:
+        password_file_default = Path(password_file_default_raw)
+        if not password_file_default.is_absolute():
+            password_file_default = (REPO_ROOT / password_file_default).resolve()
+    else:
+        password_file_default = (REPO_ROOT / "scripts/scale-test/embedding/passwords.json").resolve()
+
+    _password_file_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _load_password_file(path: Path) -> Dict[str, Any]:
+        key = str(path)
+        if key in _password_file_cache:
+            return _password_file_cache[key]
+        if not path.exists():
+            _password_file_cache[key] = {}
+            return _password_file_cache[key]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise SystemExit(f"failed to read password_file: {path} ({exc})")
+        if not isinstance(data, dict):
+            raise SystemExit(f"password_file must be a JSON object: {path}")
+        _password_file_cache[key] = data
+        return data
+
+    def _resolve_password_from_db(db: Dict[str, Any], *, host: str, user: str) -> Optional[str]:
+        h = str(host or "").strip()
+        u = str(user or "").strip()
+
+        hosts = db.get("hosts")
+        if isinstance(hosts, dict) and h:
+            hv = hosts.get(h)
+            if isinstance(hv, dict):
+                if u and u in hv:
+                    v = hv.get(u)
+                    return str(v) if v is not None else None
+            elif hv is not None:
+                return str(hv)
+
+        users = db.get("users")
+        if isinstance(users, dict) and u in users:
+            v = users.get(u)
+            return str(v) if v is not None else None
+
+        if u and u in db:
+            v = db.get(u)
+            return str(v) if v is not None else None
+        if h and h in db:
+            hv = db.get(h)
+            if isinstance(hv, dict):
+                if u and u in hv:
+                    v = hv.get(u)
+                    return str(v) if v is not None else None
+            elif hv is not None:
+                return str(hv)
+        return None
+
+    def _password_from_file(host: str, user: str, password_file_raw: Optional[str]) -> str:
+        pf = password_file_default
+        if password_file_raw:
+            pf = Path(str(password_file_raw))
+            if not pf.is_absolute():
+                pf = (REPO_ROOT / pf).resolve()
+        if pf is None:
+            raise SystemExit("password is null but no password_file is configured")
+        db = _load_password_file(pf)
+        if not db:
+            raise SystemExit(f"password is null but password_file is missing/empty: {pf}")
+        pwd = _resolve_password_from_db(db, host=host, user=user)
+        if not pwd:
+            raise SystemExit(f"password is null but no entry for user='{user}' host='{host}' in password_file: {pf}")
+        return pwd
+
     remote_repo_dir_default = str(run.get("remote_repo_dir") or str(REPO_ROOT)).strip()
     remote_result_root_default = str(run.get("remote_result_root") or "").strip() or None
 
@@ -467,6 +543,7 @@ def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
     servers_raw = run.get("servers")
     server_specs: List[ServerConfig] = []
     if isinstance(servers_raw, list):
+        _PASSWORD_MISSING = object()
         for item in servers_raw:
             if isinstance(item, str):
                 host = str(item).strip()
@@ -501,7 +578,20 @@ def _parse_scale_config(cfg_path: Path) -> ScaleConfig:
                 if not host:
                     continue
                 user = str(item.get("username") or item.get("user") or ssh_user_default or "").strip()
-                password = str(item.get("password") or "").strip()
+                raw_password = item.get("password", _PASSWORD_MISSING)
+                if raw_password is None and "password" in item:
+                    # Only resolve passwords when SSH dispatch is enabled.
+                    # When running locally (e.g. on remote workers with --no-ssh-dispatch),
+                    # configs may still contain password=null for dispatch, but the
+                    # password file is intentionally not present.
+                    if resolve_ssh_passwords:
+                        password = _password_from_file(host, user, item.get("password_file"))
+                    else:
+                        password = ""
+                elif raw_password is _PASSWORD_MISSING:
+                    password = ""
+                else:
+                    password = str(raw_password or "").strip()
 
                 port: Optional[int] = ssh_port_default
                 port_raw = item.get("port")
@@ -709,6 +799,82 @@ def _dispatch_subprocess_env() -> Dict[str, str]:
     ]:
         env.pop(k, None)
     return env
+
+
+def _maybe_preflight_socks_proxy(
+    *,
+    server: ServerConfig,
+    local_host_dir: Path,
+    dispatch_env: Dict[str, str],
+) -> bool:
+    """If ProxyCommand uses nc + SOCKS5, test reachability early.
+
+    When the SOCKS proxy cannot route to the target, ssh often surfaces this as
+    a confusing "banner exchange" timeout and an UNKNOWN port (e.g. 65535).
+    We run a cheap nc preflight so failures are obvious and logged.
+    """
+
+    proxy_cmd: Optional[str] = None
+    for opt in server.ssh_options or []:
+        if str(opt).startswith("ProxyCommand="):
+            proxy_cmd = str(opt).split("=", 1)[1].strip()
+            break
+    if not proxy_cmd:
+        return True
+
+    # Only handle the known pattern we generate in configs:
+    #   ProxyCommand=nc -x host:port -X 5 %h %p
+    try:
+        argv = shlex.split(proxy_cmd)
+    except Exception:
+        argv = []
+    if not argv:
+        return True
+    if os.path.basename(argv[0]) != "nc":
+        return True
+
+    proxy_addr: Optional[str] = None
+    proxy_proto: Optional[str] = None
+    for i, a in enumerate(argv):
+        if a == "-x" and i + 1 < len(argv):
+            proxy_addr = argv[i + 1]
+        if a == "-X" and i + 1 < len(argv):
+            proxy_proto = argv[i + 1]
+    if not proxy_addr:
+        return True
+    if proxy_proto not in {"5", "socks5"}:
+        return True
+
+    nc_bin = _which("nc")
+    if not nc_bin:
+        return True
+
+    out_path = local_host_dir / "socks_preflight.log"
+    cmd = [
+        str(nc_bin),
+        "-vz",
+        "-w",
+        "8",
+        "-x",
+        str(proxy_addr),
+        "-X",
+        "5",
+        str(server.host),
+        str(int(server.port)),
+    ]
+    p = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+        env=dispatch_env,
+    )
+    out_path.write_text(
+        _log_meta_header(cmd_for_log=" ".join(shlex.quote(x) for x in cmd), rc=int(p.returncode)) + (p.stdout or ""),
+        encoding="utf-8",
+    )
+    return p.returncode == 0
 
 
 def _requirements_profile_default_file(profile: str) -> str:
@@ -1093,6 +1259,36 @@ def _dispatch_multi_host(
         if server.password and not sshpass_bin and not dry_run:
             raise SystemExit("sshpass is required when config.run.servers[*].password is set (install sshpass or use SSH keys)")
 
+        # Pre-flight connectivity check for clearer errors in restricted networks.
+        # If a proxy is configured (ProxyCommand/ProxyJump), a direct TCP connect
+        # to host:port may be expected to fail, so skip the preflight.
+        uses_proxy = False
+        for opt in (server.ssh_options or []):
+            s = str(opt or "").strip()
+            if not s:
+                continue
+            if "proxycommand" in s.lower() or "proxyjump" in s.lower() or s.startswith("-J"):
+                uses_proxy = True
+                break
+
+        if not uses_proxy:
+            connect_port = int(server.port or 22)
+            try:
+                sock = socket.create_connection((host, connect_port), timeout=6.0)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            except Exception as exc:
+                (local_host_dir / "tcp_connect.log").write_text(
+                    f"host={host} port={connect_port} error={type(exc).__name__}: {exc}\n",
+                    encoding="utf-8",
+                )
+                raise SystemExit(
+                    f"cannot reach SSH target (host={host}, port={connect_port}). "
+                    "Check security group/firewall/VPN routing, or set run.ssh.options/servers[*].ssh_options (e.g. ProxyJump/ProxyCommand)."
+                )
+
         remote_cfg_dir = f"/tmp/scale_test_dispatch/{scale_id}"
         remote_cfg_path = f"{remote_cfg_dir}/{cfg_path.name}"
         remote_repo_dir = server.remote_repo_dir
@@ -1204,23 +1400,144 @@ def _dispatch_multi_host(
             )
 
         setup = " ".join(f"{cmd};" for cmd in (setup_cmds or [])).strip()
+
+        # Remote lock + early cleanup:
+        # - Avoid overlapping dispatches killing each other mid-run.
+        # - Honor the user's "if something is already running, kill it first".
+        # We do this BEFORE pre_requirements so a slow pre_requirements phase
+        # in one dispatch won't kill an already-running newer dispatch.
+        lock_dir = "/tmp/mmpe_scale_test_lock_fix_token_len"
+        remote_repo_dir_norm = remote_repo_dir.rstrip("/")
+        kill_auto_test_pat = f"{remote_repo_dir_norm}/scripts/auto-test/embedding/run_auto_test.py"
+        kill_scale_pat = f"{remote_repo_dir_norm}/scripts/scale-test/embedding/run_scale_fix_token_len.py"
+        # Use a bracket trick in pgrep patterns so the pgrep process won't match
+        # itself. We still must exclude $$/$PPID because the remote `bash -lc`
+        # command line contains the script paths.
+        kill_auto_test_pat_pgrep = kill_auto_test_pat.replace("/run_auto_test.py", "/[r]un_auto_test.py")
+        kill_scale_pat_pgrep = kill_scale_pat.replace("/run_scale_fix_token_len.py", "/[r]un_scale_fix_token_len.py")
+        lock_and_cleanup = (
+            f"LOCK_DIR={shlex.quote(lock_dir)}; "
+            + "echo \"[dispatch] acquiring lock: $LOCK_DIR\"; "
+            + "if mkdir \"$LOCK_DIR\" 2>/dev/null; then "
+            + "echo $$ > \"$LOCK_DIR/pid\"; "
+            + "else "
+            + "echo '[dispatch] lock exists; killing stale processes and restarting'; "
+            + "if command -v pgrep >/dev/null 2>&1; then "
+            + f"pids=$(pgrep -f {shlex.quote(kill_auto_test_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -TERM $pid >/dev/null 2>&1 || true; fi; done; "
+            + f"pids=$(pgrep -f {shlex.quote(kill_scale_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -TERM $pid >/dev/null 2>&1 || true; fi; done; "
+            + "fi; "
+            + "sleep 2; "
+            + "rm -rf \"$LOCK_DIR\" >/dev/null 2>&1 || true; "
+            + "mkdir \"$LOCK_DIR\" 2>/dev/null || { echo '[dispatch] failed to create lock dir'; exit 1; }; "
+            + "echo $$ > \"$LOCK_DIR/pid\" || { echo '[dispatch] failed to write lock pid'; exit 1; }; "
+            + "fi; "
+            + "trap \"rm -rf \\\"$LOCK_DIR\\\" >/dev/null 2>&1 || true\" EXIT; "
+            + "if command -v pgrep >/dev/null 2>&1; then "
+            + f"pids=$(pgrep -f {shlex.quote(kill_auto_test_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -TERM $pid >/dev/null 2>&1 || true; fi; done; "
+            + f"pids=$(pgrep -f {shlex.quote(kill_scale_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -TERM $pid >/dev/null 2>&1 || true; fi; done; "
+            + "sleep 1; "
+            + f"pids=$(pgrep -f {shlex.quote(kill_auto_test_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -KILL $pid >/dev/null 2>&1 || true; fi; done; "
+            + f"pids=$(pgrep -f {shlex.quote(kill_scale_pat_pgrep)} 2>/dev/null || true); "
+            + "for pid in $pids; do if [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ]; then kill -KILL $pid >/dev/null 2>&1 || true; fi; done; "
+            + "fi; "
+        )
+
+        # Also kill a stale listener early (if any), so we don't later confuse
+        # "server won't bind" errors with installation/setup steps.
+        if base_port:
+            lock_and_cleanup += (
+                "PORT="
+                + shlex.quote(str(int(base_port)))
+                + "; "
+                + "if command -v lsof >/dev/null 2>&1; then "
+                + "pids=$(lsof -t -iTCP:${PORT} -sTCP:LISTEN 2>/dev/null || true); "
+                + "if [ -n \"$pids\" ]; then "
+                + "echo \"[dispatch] killing stale listeners on :${PORT}: $pids\"; "
+                + "kill -TERM $pids >/dev/null 2>&1 || true; "
+                + "sleep 1; "
+                + "kill -KILL $pids >/dev/null 2>&1 || true; "
+                + "fi; "
+                + "fi; "
+            )
+        # Always create remote_run_dir early and collect debug artifacts (server logs, port/process state)
+        # even when the remote sweep fails. This makes post-mortem analysis possible.
+        remote_run_dir_quoted = shlex.quote(remote_run_dir)
+        remote_repo_dir_quoted = shlex.quote(remote_repo_dir)
+        debug_dir = f"{remote_run_dir.rstrip('/')}/dispatch_debug"
+        debug_dir_q = shlex.quote(debug_dir)
+        base_port_q = shlex.quote(str(int(base_port))) if base_port else ""
+
         remote_cmd = (
             "set -e; "
+            + lock_and_cleanup
+            + f"REMOTE_RUN_DIR={remote_run_dir_quoted}; "
+            + f"REMOTE_REPO_DIR={remote_repo_dir_quoted}; "
+            + f"DEBUG_DIR={debug_dir_q}; "
+            + "mkdir -p \"$REMOTE_RUN_DIR\" \"$DEBUG_DIR\"; "
+            + "echo \"[dispatch] remote_run_dir=$REMOTE_RUN_DIR\"; "
             + "echo '[dispatch] phase=pre_requirements'; "
             + pre_req_prefix
             + "echo '[dispatch] phase=setup'; "
-            + f"cd {shlex.quote(remote_repo_dir)}; "
+            + f"cd {remote_repo_dir_quoted}; "
             + ("echo '[dispatch] setup_cmds=begin'; " if setup else "")
             + (setup + " " if setup else "")
             + ("echo '[dispatch] setup_cmds=end'; " if setup else "")
             + "echo '[dispatch] phase=run'; "
-            + f"{server.remote_python} scripts/scale-test/embedding/run_scale_fix_token_len.py "
+            # Run the remote sweep but DO NOT abort the whole SSH session on failure;
+            # we still want to collect server logs and snapshots.
+            + "set +e; "
+            # Force python to flush promptly so SSH logs show progress.
+            + f"PYTHONUNBUFFERED=1 {server.remote_python} scripts/scale-test/embedding/run_scale_fix_token_len.py "
             + f"--config {shlex.quote(remote_cfg_path)} "
             + "--no-ssh-dispatch "
             + f"--scale-id {shlex.quote(scale_id)} "
             + f"--result-root {shlex.quote(remote_result_root)} "
             + ("--tee " if tee else "")
             + ("--dry-run " if dry_run else "")
+            # Background the sweep and emit periodic heartbeats so we can see remote progress even
+            # if the sweep is silent (e.g. stuck starting a server / waiting on a request).
+            + "& SWEEP_PID=$!; "
+            + "echo \"[dispatch] sweep_pid=$SWEEP_PID\"; "
+            + "HB=0; AT_LOG=\"\"; "
+            + "while kill -0 \"$SWEEP_PID\" 2>/dev/null; do "
+            + "HB=$((HB+1)); "
+            + "echo \"[dispatch] heartbeat=$HB ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; "
+            + "ps -o pid,etime,pcpu,pmem,cmd -p \"$SWEEP_PID\" 2>/dev/null | sed -E 's/^/[dispatch] /' || true; "
+            + "if [ -z \"$AT_LOG\" ]; then AT_LOG=$(find \"$REMOTE_RUN_DIR\" -maxdepth 3 -type f -name auto_test_stdout.log 2>/dev/null | head -n 1 || true); fi; "
+            + "if [ -n \"$AT_LOG\" ] && [ -f \"$AT_LOG\" ]; then "
+            + "  echo \"[dispatch] tail_auto_test_stdout=$(basename \"$AT_LOG\")\"; "
+            + "  tail -n 5 \"$AT_LOG\" 2>/dev/null | sed -E 's/^/[dispatch] /' || true; "
+            + "fi; "
+            + "sleep 60; "
+            + "done; "
+            + "wait \"$SWEEP_PID\"; RC=$?; set -e; "
+            + "echo \"[dispatch] sweep_rc=$RC\"; "
+            # Snapshot: port/process state (best-effort)
+            + (f"(echo '=== ss -ltnp | grep :{int(base_port)} ==='; ss -ltnp 2>/dev/null | grep -F ':{int(base_port)}' || true) > \"$DEBUG_DIR/port_{int(base_port)}.txt\" 2>&1; " if base_port else "")
+            + "(echo '=== ps -ef | egrep (sglang|uvicorn|vllm) ==='; ps -ef | egrep -i 'sglang|uvicorn|vllm' | head -n 200 || true) > \"$DEBUG_DIR/ps_servers.txt\" 2>&1; "
+            + "(echo '=== df -h ==='; df -h || true) > \"$DEBUG_DIR/df.txt\" 2>&1; "
+            # Collect common server log directories from the repo checkout.
+            + "mkdir -p \"$DEBUG_DIR/server_logs\"; "
+            + "for d in scripts/embedding/sglang/sglang_logs scripts/embedding/vllm/vllm_logs; do "
+            + "  if [ -d \"$REMOTE_REPO_DIR/$d\" ]; then "
+            + "    bn=$(basename \"$d\"); "
+            + "    cp -a \"$REMOTE_REPO_DIR/$d\" \"$DEBUG_DIR/server_logs/$bn\" 2>/dev/null || true; "
+            + "  fi; "
+            + "done; "
+            # Print a small tail of the newest logs to the SSH stdout so it lands in remote_run.log.
+            + "if [ -d \"$DEBUG_DIR/server_logs\" ]; then "
+            + "  echo '[dispatch] server_logs_tail=begin'; "
+            + "  find \"$DEBUG_DIR/server_logs\" \\( -name '*.log' -o -name '*.txt' \\) -type f 2>/dev/null | head -n 20 | while read -r f; do "
+            + "    echo \"--- $f ---\"; tail -n 80 \"$f\" 2>/dev/null || true; "
+            + "  done; "
+            + "  echo '[dispatch] server_logs_tail=end'; "
+            + "fi; "
+            + "exit $RC"
         ).strip()
 
         print(f"[info] dispatch host={host}")
@@ -1240,6 +1557,13 @@ def _dispatch_multi_host(
             else:
                 print(f"[dry-run] ssh {target} bash -lc {remote_cmd}")
             continue
+
+        if not _maybe_preflight_socks_proxy(server=server, local_host_dir=local_host_dir, dispatch_env=dispatch_env):
+            print(
+                f"[error] SOCKS proxy cannot reach {host}:{server.port}. "
+                f"Check proxy ACL/routing. See {local_host_dir / 'socks_preflight.log'}"
+            )
+            return 255
 
         # 1) mkdir remote cfg dir
         mkdir_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(f"mkdir -p {shlex.quote(remote_cfg_dir)}")]
@@ -1320,6 +1644,7 @@ def _dispatch_multi_host(
                 str(rsync_bin),
                 "-az",
                 "--delete",
+                "--force",
                 "--prune-empty-dirs",
                 "--filter=:- .gitignore",
                 "--exclude=.git/",
@@ -1341,7 +1666,7 @@ def _dispatch_multi_host(
             )
             rsync_dest = f"{target}:{remote_repo_dir.rstrip('/')}/"
             rsync_cmd_for_log = (
-                f"{shlex.quote(str(rsync_bin))} -az --delete --prune-empty-dirs --filter=:- .gitignore --exclude=.git/ "
+                f"{shlex.quote(str(rsync_bin))} -az --delete --force --prune-empty-dirs --filter=:- .gitignore --exclude=.git/ "
                 + f"-e {shlex.quote(rsync_ssh_log)} {shlex.quote(str(REPO_ROOT).rstrip('/') + '/')} {shlex.quote(rsync_dest)}"
             )
             (local_host_dir / "rsync_repo_push.log").write_text(
@@ -1412,24 +1737,44 @@ def _dispatch_multi_host(
         except Exception:
             pass
 
-        # 4) rsync back
-        rsync_ssh = _rsync_ssh_command(server)
+        # 4) rsync back (best-effort). Even when the remote run fails, try to
+        # copy back whatever was written under remote_run_dir (including
+        # dispatch_debug server logs).
         rsync_src = f"{target}:{remote_run_dir.rstrip('/')}/"
-        rsync_cmd = [str(rsync_bin), "-az", "-e", rsync_ssh, rsync_src, str(local_host_dir) + "/"]
-        p4 = subprocess.run(
-            rsync_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-            env=dispatch_env,
-        )
-        (local_host_dir / "rsync_back.log").write_text(p4.stdout or "", encoding="utf-8")
-        if p4.returncode != 0:
-            print(f"[error] rsync failed (host={host}, rc={p4.returncode}). See {local_host_dir / 'rsync_back.log'}")
-            if not scale.continue_on_error:
-                return int(p4.returncode)
-            continue
+        if rsync_bin and not dry_run:
+            # Avoid a noisy rsync error if the directory truly does not exist.
+            chk_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(f"test -d {shlex.quote(remote_run_dir)} && echo OK || echo MISSING")]
+            pchk = subprocess.run(
+                chk_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                env=dispatch_env,
+            )
+            (local_host_dir / "remote_run_dir_check.log").write_text(pchk.stdout or "", encoding="utf-8")
+            if "OK" not in (pchk.stdout or ""):
+                (local_host_dir / "rsync_back.log").write_text(
+                    f"remote_run_dir missing on host (rc3={rc3}); skipped rsync_back.\n",
+                    encoding="utf-8",
+                )
+            else:
+                rsync_ssh = _rsync_ssh_command(server)
+                rsync_cmd = [str(rsync_bin), "-az", "-e", rsync_ssh, rsync_src, str(local_host_dir) + "/"]
+                p4 = subprocess.run(
+                    rsync_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    env=dispatch_env,
+                )
+                (local_host_dir / "rsync_back.log").write_text(p4.stdout or "", encoding="utf-8")
+                if p4.returncode != 0:
+                    print(f"[error] rsync failed (host={host}, rc={p4.returncode}). See {local_host_dir / 'rsync_back.log'}")
+                    if not scale.continue_on_error:
+                        return int(p4.returncode)
+                    continue
 
         # 5) load host aggregate and rewrite paths to local copies
         host_agg = local_host_dir / "aggregate.csv"
@@ -1592,6 +1937,25 @@ def _generate_auto_test_config(
                     "SYNTHETIC_TOKEN_LEN": str(int(tl)),
                     "DTYPE": dtype,
                 }
+
+                # For HTTP backends, large batch sizes on CPU can exceed the default
+                # 120s request timeout during warmup/first runs.
+                #
+                # Use job_template.embedding_http_timeout_sec / http_timeout_sec to
+                # override; otherwise default to 900s.
+                http_timeout_sec: Optional[int] = None
+                for k in ["embedding_http_timeout_sec", "http_timeout_sec", "embedding_http_timeout", "http_timeout"]:
+                    v = jt.get(k)
+                    if v is None or str(v).strip() == "":
+                        continue
+                    try:
+                        http_timeout_sec = int(float(v))
+                        break
+                    except Exception:
+                        continue
+                if http_timeout_sec is None:
+                    http_timeout_sec = 900
+                env.setdefault("EMBEDDING_HTTP_TIMEOUT", str(http_timeout_sec))
 
                 # Merge user-provided env first (can override any defaults).
                 for k, v in extra_env.items():
@@ -1987,7 +2351,7 @@ def main() -> int:
             f"- { (REPO_ROOT / cfg_path_in).resolve() }\n"
         )
 
-    scale = _parse_scale_config(cfg_path)
+    scale = _parse_scale_config(cfg_path, resolve_ssh_passwords=not bool(args.no_ssh_dispatch))
 
     # Allow overriding result_root from CLI.
     result_root = scale.result_root
@@ -2003,7 +2367,7 @@ def main() -> int:
     # Multi-host dispatch mode: run the same sweep on all servers via SSH and
     # copy results back under <result_root>/<scale_id>/hosts/<host>/.
     if scale.dispatch.servers and not bool(args.no_ssh_dispatch):
-        return _dispatch_multi_host(
+        dispatch_rc = _dispatch_multi_host(
             cfg_path=cfg_path,
             scale=scale,
             result_root=result_root,
@@ -2012,6 +2376,14 @@ def main() -> int:
             dry_run=bool(args.dry_run),
             remote_clean_repo=_parse_bool(args.remote_clean_repo),
         )
+
+        # Generate local analysis artifacts for the aggregated run directory so
+        # the web UI can discover it (it keys off <run_dir>/analysis/).
+        if not bool(args.no_analyze):
+            run_dir = (result_root / scale_id).resolve()
+            if run_dir.exists() and (run_dir / "aggregate.csv").exists():
+                _run_post_analyze(run_dir=run_dir, tee=tee)
+        return int(dispatch_rc)
 
     out_dir = result_root / scale_id
     out_dir.mkdir(parents=True, exist_ok=True)

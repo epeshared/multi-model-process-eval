@@ -27,6 +27,12 @@ fi
 
 chmod a+x "$INSTALLER"
 
+# If Miniforge is already installed, skip re-install.
+if [[ -x "${PREFIX}/bin/conda" ]]; then
+  echo "[ok] miniforge already installed at ${PREFIX}"
+  exit 0
+fi
+
 # Equivalent to:
 #   bash ./Miniforge3-Linux-x86_64.sh -b -u
 # but we also pin the install prefix to match PATH export below.

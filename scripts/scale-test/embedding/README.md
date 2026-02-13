@@ -22,7 +22,22 @@ is on your `PATH`. Make sure your active Python environment has the required dep
 
 2) Run:
 
+- `conda activate sglang-cpu`
+
 - `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
+
+### Background (nohup) run
+
+If you want the runner to keep running after you disconnect, use the wrapper script’s `--nohup` mode.
+It writes the local launcher logs under the matching run directory:
+
+- `<result_root>/<scale_id>/launcher_logs/nohup.log`
+- `<result_root>/<scale_id>/launcher_logs/nohup.pid`
+
+Example:
+
+- `bash scripts/scale-test/embedding/run_scale_fix_token_len.sh --config scripts/scale-test/embedding/config_scale_fix_token_len.json --nohup`
+- `bash scripts/scale-test/embedding/monitor_scale_fix_token_len.sh --scale-id <scale_id>`
 
 ## Outputs
 
@@ -135,7 +150,8 @@ If you want to run the **same sweep on multiple servers** and copy the results b
 			"user": "", 
 			"port": 22,
 			"identity_file": "",
-			"options": []
+			"options": [],
+			"password_file": "scripts/scale-test/embedding/passwords.json"
 		}
 	}
 }
@@ -151,6 +167,29 @@ Backward compatibility:
 
 If you set `password`, the dispatcher uses `sshpass` on the **local** machine for ssh/scp/rsync.
 Storing passwords in plain JSON is not recommended; prefer SSH keys.
+
+Password file support:
+
+- If `servers[*].password` is `null`, the runner will read that user's password from a local password file.
+- Default path: `scripts/scale-test/embedding/passwords.json` (ignored by git).
+- You can override globally via `run.ssh.password_file`, or per-server via `servers[*].password_file`.
+
+Example `passwords.json`:
+
+```json
+{
+	"users": {
+		"ubuntu": "your-ssh-password",
+		"root": "root-password"
+	},
+	"hosts": {
+		"10.0.0.11": {
+			"ubuntu": "host-specific-password"
+		},
+		"10.0.0.12": "fallback-for-any-user"
+	}
+}
+```
 
 Then run as usual:
 

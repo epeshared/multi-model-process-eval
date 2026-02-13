@@ -11,16 +11,67 @@ export PIP_NO_INPUT="1"
 repo_url="https://github.com/sgl-project/sglang.git"
 src_dir="${SGLANG_SRC_DIR:-sglang}"
 
+git_with_timeout() {
+	# Avoid hanging forever on flaky networks.
+	# Use timeout(1) when available; otherwise fall back to a tiny Python wrapper.
+	local timeout_s="${GIT_TIMEOUT_SECONDS:-45}"
+	if command -v timeout >/dev/null 2>&1; then
+		GIT_TERMINAL_PROMPT=0 timeout "${timeout_s}" git "$@"
+	elif command -v python >/dev/null 2>&1; then
+		GIT_TERMINAL_PROMPT=0 python - "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+timeout_s = int(os.environ.get("GIT_TIMEOUT_SECONDS", "45"))
+cmd = ["git", *sys.argv[1:]]
+try:
+	subprocess.run(cmd, check=True, timeout=timeout_s)
+except subprocess.TimeoutExpired:
+	# Match GNU timeout's exit code for timeouts.
+	sys.exit(124)
+PY
+	else
+		GIT_TERMINAL_PROMPT=0 git "$@"
+	fi
+}
+
 if [[ -d "${src_dir}/.git" ]]; then
 	echo "[info] sglang repo exists; updating (${src_dir})"
-	git -C "${src_dir}" fetch --all --prune
+	# GitHub connectivity can be flaky on some cloud networks; retry fetch, and
+	# if it still fails, proceed with the existing checkout.
+	fetch_ok=0
+	for i in 1 2 3; do
+		if git_with_timeout -C "${src_dir}" fetch --all --prune; then
+			fetch_ok=1
+			break
+		fi
+		echo "[warn] git fetch failed (attempt ${i}/3); retrying..." >&2
+		sleep 2
+	done
+	if [[ "${fetch_ok}" != "1" ]]; then
+		echo "[warn] git fetch failed; using existing sglang checkout" >&2
+	fi
 	# Best-effort: use origin/main when present.
-	git -C "${src_dir}" reset --hard origin/main 2>/dev/null || git -C "${src_dir}" reset --hard origin/master 2>/dev/null || true
+	git -C "${src_dir}" reset --hard origin/main 2>/dev/null || git -C "${src_dir}" reset --hard origin/master 2>/dev/null || \
+		echo "[warn] could not reset to origin/main; leaving current HEAD" >&2
 elif [[ -e "${src_dir}" ]]; then
 	echo "[error] ${src_dir} exists but is not a git repo; please remove it or set SGLANG_SRC_DIR" >&2
 	exit 1
 else
-	git clone "${repo_url}" "${src_dir}"
+	clone_ok=0
+	for i in 1 2 3; do
+		if git_with_timeout clone "${repo_url}" "${src_dir}"; then
+			clone_ok=1
+			break
+		fi
+		echo "[warn] git clone failed (attempt ${i}/3); retrying..." >&2
+		sleep 2
+	done
+	if [[ "${clone_ok}" != "1" ]]; then
+		echo "[error] failed to clone sglang after retries" >&2
+		exit 1
+	fi
 fi
 
 cd "${src_dir}"
@@ -157,6 +208,15 @@ fi
 pip install .
 cd ../sgl-kernel
 cp pyproject_cpu.toml pyproject.toml
+
+# Some environments export CC/CXX with additional flags (e.g. "g++ -pthread -B ..."),
+# which confuses CMake (it expects a compiler path). Prefer letting CMake detect
+# system compilers.
+unset CC CXX
+if ! command -v g++ >/dev/null 2>&1; then
+	echo "[error] g++ not found; install build-essential/g++ on the host" >&2
+	exit 1
+fi
 
 # Some hosts have a /usr/local/cuda stub without nvcc; Torch's CMake config may
 # attempt to enable CUDA and fail the build. Force-disable CUDA discovery.

@@ -209,6 +209,40 @@ def _sanitize_job_id(job_name: str, *, max_len: int = 80) -> str:
     return f"{s}__{h}"
 
 
+def _guess_auto_test_stdout_log(run_dir: Path, variant: str) -> str:
+    """Best-effort locate auto_test_stdout.log for a variant.
+
+    Layouts we support:
+    - run_dir/<variant>/auto_test_stdout.log               (older expected)
+    - run_dir/auto_test_stdout.log                         (single-variant)
+    - run_dir/hosts/<host>/auto_test_stdout.log            (scale-test multi-host)
+    """
+
+    v = str(variant or "").strip()
+    if v:
+        p1 = (run_dir / v / "auto_test_stdout.log").resolve()
+        if p1.exists():
+            return str(p1)
+
+    p2 = (run_dir / "auto_test_stdout.log").resolve()
+    if p2.exists():
+        return str(p2)
+
+    hosts_dir = run_dir / "hosts"
+    if hosts_dir.exists() and hosts_dir.is_dir():
+        try:
+            for p in sorted(hosts_dir.glob("*/auto_test_stdout.log")):
+                if p.exists():
+                    return str(p.resolve())
+        except Exception:
+            pass
+
+    # Fallback to the historical default.
+    if v:
+        return str((run_dir / v / "auto_test_stdout.log").resolve())
+    return str((run_dir / "auto_test_stdout.log").resolve())
+
+
 def _render_run_summary_html(
     *,
     run_dir: Path,
@@ -726,7 +760,7 @@ def main() -> int:
         failed_variants = failed_variants.merge(summary, on="variant", how="left")
         # Attach likely log path.
         failed_variants["auto_test_stdout_log"] = failed_variants["variant"].apply(
-            lambda v: str((run_dir / v / "auto_test_stdout.log").resolve())
+            lambda v: _guess_auto_test_stdout_log(run_dir, str(v))
         )
 
     _write_csv(failed_variants, out_dir / "failed_variants.csv")

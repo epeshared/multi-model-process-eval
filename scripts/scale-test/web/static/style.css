@@ -118,6 +118,15 @@ button, .btn {
   font-size: 13px;
 }
 
+button.danger, .btn.danger {
+  background: linear-gradient(180deg, rgba(255, 99, 132, 0.25) 0%, rgba(255, 99, 132, 0.12) 100%);
+  border: 1px solid rgba(255, 99, 132, 0.55);
+}
+
+button.danger:hover, .btn.danger:hover {
+  border-color: rgba(255, 99, 132, 0.8);
+}
+
 button:hover, .btn:hover {
   border-color: rgba(122,162,255,0.7);
 }
@@ -201,6 +210,11 @@ button:hover, .btn:hover {
   border: 1px solid var(--border);
   border-radius: 10px;
   margin-top: 10px;
+}
+
+/* CSV compare tables: scroll within the table so the header stays fixed */
+.table-scroll.csv-compare-scroll {
+  max-height: 75vh;
 }
 
 /* CSV preview: show ~10 rows by default, scroll to see more */

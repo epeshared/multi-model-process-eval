@@ -18,6 +18,10 @@ fi
 # Quick existence check
 if conda env list | awk '{print $1}' | grep -qx "${env_name}"; then
   echo "[ok] ensure_conda_env: env exists (${env_name})"
+  echo "[info] ensure_conda_env: ensuring libnuma/numactl in env (${env_name})"
+  # Needed by sglang-kernel-cpu build (expects libnuma inside the conda env).
+  conda install -y -n "${env_name}" -c conda-forge libnuma numactl >/dev/null 2>&1 || \
+    conda install -y -n "${env_name}" libnuma numactl >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -26,5 +30,9 @@ conda create -y -n "${env_name}" "python=${py_ver}" pip
 
 # Best-effort: make pip usable immediately.
 conda run -n "${env_name}" python -m pip install -U pip >/dev/null 2>&1 || true
+
+echo "[info] ensure_conda_env: installing libnuma/numactl in env (${env_name})"
+conda install -y -n "${env_name}" -c conda-forge libnuma numactl >/dev/null 2>&1 || \
+  conda install -y -n "${env_name}" libnuma numactl >/dev/null 2>&1 || true
 
 echo "[ok] ensure_conda_env: created (${env_name})"
