@@ -1381,6 +1381,7 @@ def _dispatch_multi_host(
             if ss:
                 setup_cmds.append(ss)
 
+        resume_pip_marker_file = ""
         if bool(server.install_requirements):
             reqs: List[str] = []
             base_req = _requirements_profile_default_file(server.requirements_profile)
@@ -1402,8 +1403,12 @@ def _dispatch_multi_host(
 
             pip_args = " ".join(shlex.quote(a) for a in (server.pip_extra_args or []))
             marker_key = _compute_requirements_marker_key(server=server, reqs=reqs)
-            marker_dir = "~/.cache/multi-model-process-eval/pip_markers"
+            # Do NOT use a quoted '~' path here: tilde expansion does not occur
+            # inside quotes, which breaks the cache marker. Use $HOME instead.
+            # (No spaces expected; keep unquoted for shell expansion.)
+            marker_dir = "$HOME/.cache/multi-model-process-eval/pip_markers"
             marker_file = f"{marker_dir}/{marker_key}.ok"
+            resume_pip_marker_file = marker_file
 
             # Install all requirements in one shot (less output), and cache via marker.
             # Marker is only written on success.
@@ -1412,13 +1417,13 @@ def _dispatch_multi_host(
                 f"{server.remote_python} -m pip install --progress-bar off --disable-pip-version-check --no-input --root-user-action=ignore {pip_args}".strip()
             )
             setup_cmds.append(
-                f"mkdir -p {shlex.quote(marker_dir)}; "
-                + f"if [ -f {shlex.quote(marker_file)} ]; then "
+                f"mkdir -p {marker_dir}; "
+                + f"if [ -f {marker_file} ]; then "
                 + f"echo \"[setup] pip requirements cached: {marker_key}\"; "
                 + "else "
                 + f"echo \"[setup] installing pip requirements (cache miss): {marker_key}\"; "
                 + f"{pip_base} {req_flags}; "
-                + f"date -u +%Y-%m-%dT%H:%M:%SZ > {shlex.quote(marker_file)}; "
+                + f"date -u +%Y-%m-%dT%H:%M:%SZ > {marker_file}; "
                 + "fi"
             )
 
@@ -1495,22 +1500,71 @@ def _dispatch_multi_host(
         debug_dir_q = shlex.quote(debug_dir)
         base_port_q = shlex.quote(str(int(base_port))) if base_port else ""
 
+        # Resume behavior: in multi-host dispatch, users typically expect --resume
+        # to continue the remote test quickly without re-running pre-requirements
+        # and dependency installation if the environment is already prepared.
+        #
+        # Heuristic:
+        # - If the pip requirements marker exists on the remote host, treat setup
+        #   as already satisfied.
+        # - Otherwise, if the remote run directory already exists and is non-empty
+        #   (from a previous attempt), also skip setup.
+        #
+        # We also write a per-run setup marker under the run directory for clarity.
+        remote_setup_marker = f"{remote_run_dir.rstrip('/')}/dispatch_debug/dispatch_setup.ok"
+        remote_setup_marker_q = shlex.quote(remote_setup_marker)
+        need_conda = bool(str(server.conda_env or "").strip()) or ("conda" in str(server.remote_python or "").lower())
+
+        # This bootstrap is cheap and safe to run even when skipping setup.
+        # It helps when conda exists but isn't on PATH in a non-interactive shell.
+        conda_bootstrap = (
+            "if ! command -v conda >/dev/null 2>&1; then "
+            "  if [ -x \"$HOME/miniforge3/bin/conda\" ]; then export PATH=\"$HOME/miniforge3/bin:$PATH\"; fi; "
+            "  if [ -f \"$HOME/miniforge3/etc/profile.d/conda.sh\" ]; then . \"$HOME/miniforge3/etc/profile.d/conda.sh\" >/dev/null 2>&1 || true; fi; "
+            "fi; "
+        )
+
+        # Guard to decide whether to skip remote pre_requirements/setup.
+        # Always define variables so non-resume runs behave correctly.
+        setup_skip_guard = f"SETUP_MARKER={remote_setup_marker_q}; SKIP_SETUP=0; "
+        if resume:
+            if resume_pip_marker_file:
+                setup_skip_guard += f"if [ -f {resume_pip_marker_file} ]; then SKIP_SETUP=1; fi; "
+            setup_skip_guard += (
+                "if [ \"$SKIP_SETUP\" = \"0\" ] && [ -d \"$REMOTE_RUN_DIR\" ]; then "
+                "  if [ -n \"$(ls -A \"$REMOTE_RUN_DIR\" 2>/dev/null || true)\" ]; then SKIP_SETUP=1; fi; "
+                "fi; "
+            )
+            if need_conda:
+                setup_skip_guard += (
+                    # If conda is truly missing, we cannot run the sweep; force setup.
+                    conda_bootstrap
+                    + "if [ \"$SKIP_SETUP\" = \"1\" ] && ! command -v conda >/dev/null 2>&1; then "
+                    + "  echo '[dispatch] resume: conda not found; will run pre_requirements/setup'; SKIP_SETUP=0; "
+                    + "fi; "
+                )
+            setup_skip_guard += (
+                "if [ \"$SKIP_SETUP\" = \"1\" ]; then echo '[dispatch] resume: skipping pre_requirements/setup'; "
+                "else echo '[dispatch] resume: running pre_requirements/setup'; fi; "
+            )
+
         remote_cmd = (
             "set -e; "
             + lock_and_cleanup
             + f"REMOTE_RUN_DIR={remote_run_dir_quoted}; "
             + f"REMOTE_REPO_DIR={remote_repo_dir_quoted}; "
             + f"DEBUG_DIR={debug_dir_q}; "
+            # Detect whether we can skip remote setup before creating the run dir.
+            + setup_skip_guard
             + "mkdir -p \"$REMOTE_RUN_DIR\" \"$DEBUG_DIR\"; "
             + "echo \"[dispatch] remote_run_dir=$REMOTE_RUN_DIR\"; "
-            + "echo '[dispatch] phase=pre_requirements'; "
-            + pre_req_prefix
-            + "echo '[dispatch] phase=setup'; "
+            + ("if [ \"$SKIP_SETUP\" = \"1\" ]; then echo '[dispatch] phase=pre_requirements (skipped)'; else echo '[dispatch] phase=pre_requirements'; " + pre_req_prefix + "fi; ")
+            + ("if [ \"$SKIP_SETUP\" = \"1\" ]; then echo '[dispatch] phase=setup (skipped)'; else echo '[dispatch] phase=setup'; " + f"cd {remote_repo_dir_quoted}; " + ("echo '[dispatch] setup_cmds=begin'; " if setup else "") + (setup + " " if setup else "") + ("echo '[dispatch] setup_cmds=end'; " if setup else "") + "date -u +%Y-%m-%dT%H:%M:%SZ > \"$SETUP_MARKER\"; fi; ")
+            # Always cd into repo before running.
             + f"cd {remote_repo_dir_quoted}; "
-            + ("echo '[dispatch] setup_cmds=begin'; " if setup else "")
-            + (setup + " " if setup else "")
-            + ("echo '[dispatch] setup_cmds=end'; " if setup else "")
             + "echo '[dispatch] phase=run'; "
+            # Best-effort: ensure conda is discoverable for remote_python.
+            + conda_bootstrap
             # Run the remote sweep but DO NOT abort the whole SSH session on failure;
             # we still want to collect server logs and snapshots.
             + "set +e; "
@@ -1723,7 +1777,42 @@ def _dispatch_multi_host(
             continue
 
         # 2b) scp pre-requirements scripts (optional)
-        if pre_req_items:
+        skip_pre_req_scp = False
+        if resume and pre_req_items and not dry_run:
+            # If resuming and the remote host already has a prepared environment,
+            # avoid SCPing pre-requirements scripts (can be flaky behind proxies).
+            conda_ok = "true"
+            if need_conda:
+                conda_ok = "(command -v conda >/dev/null 2>&1 || [ -x \"$HOME/miniforge3/bin/conda\" ])"
+            if resume_pip_marker_file:
+                preflight = (
+                    f"if {conda_ok}; then "
+                    + f"  if [ -f {resume_pip_marker_file} ]; then echo SKIP_PIP; "
+                    + f"  elif [ -d {shlex.quote(remote_run_dir)} ] && [ -n \"$(ls -A {shlex.quote(remote_run_dir)} 2>/dev/null || true)\" ]; then echo SKIP_RUNDIR; "
+                    + "  else echo NEED; fi; "
+                    + "else echo NEED_CONDA; fi"
+                )
+            else:
+                preflight = (
+                    f"if {conda_ok}; then "
+                    + f"  if [ -d {shlex.quote(remote_run_dir)} ] && [ -n \"$(ls -A {shlex.quote(remote_run_dir)} 2>/dev/null || true)\" ]; then echo SKIP_RUNDIR; "
+                    + "  else echo NEED; fi; "
+                    + "else echo NEED_CONDA; fi"
+                )
+            chk_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(preflight)]
+            ppf = subprocess.run(
+                chk_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                env=dispatch_env,
+            )
+            (local_host_dir / "resume_pre_req_preflight.log").write_text(ppf.stdout or "", encoding="utf-8")
+            if "SKIP_PIP" in (ppf.stdout or "") or "SKIP_RUNDIR" in (ppf.stdout or ""):
+                skip_pre_req_scp = True
+
+        if pre_req_items and not skip_pre_req_scp:
             log_lines: List[str] = []
             for _, local_p, remote_p in pre_req_items:
                 if not local_p.exists():
@@ -1740,11 +1829,17 @@ def _dispatch_multi_host(
                 log_lines.append(p2b.stdout or "")
                 if p2b.returncode != 0:
                     (local_host_dir / "scp_pre_requirements.log").write_text("\n".join(log_lines), encoding="utf-8")
-                    print(f"[error] scp pre-requirements failed (host={host}, rc={p2b.returncode})")
+                    lvl = "warn" if resume else "error"
+                    print(f"[{lvl}] scp pre-requirements failed (host={host}, rc={p2b.returncode})")
                     if not scale.continue_on_error:
                         return int(p2b.returncode)
                     continue
             (local_host_dir / "scp_pre_requirements.log").write_text("\n".join(log_lines), encoding="utf-8")
+        elif skip_pre_req_scp:
+            (local_host_dir / "scp_pre_requirements.log").write_text(
+                "[resume] skipped scp of pre-requirements scripts (remote env appears ready)\n",
+                encoding="utf-8",
+            )
 
         # 3) run remote sweep
         run_cmd = prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(remote_cmd)]

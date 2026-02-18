@@ -34,10 +34,12 @@ Options:
 	--nohup           Run in background and write logs under <result_root>/<scale_id>/launcher_logs/
 
 Forwarded runner flags (examples):
+	--scale-id <ID>   Put all artifacts under <result_root>/<scale_id>/ (also used for remote dispatch)
 	--resume          Skip jobs/hosts already completed successfully in the same <result_root>/<scale_id>/
 
 Notes:
 	- In --nohup mode, this script auto-chooses --scale-id if you didn't pass one.
+	- If you want --resume to actually resume, pass a fixed --scale-id.
 	- To monitor: bash scripts/scale-test/embedding/monitor_scale_fix_token_len.sh --scale-id <scale_id>
 EOF
 }
