@@ -992,6 +992,14 @@ def _capture_local_lscpu(*, out_dir: Path) -> None:
     except Exception as e:
         (info_dir / "lscpu.error.txt").write_text(str(e) + "\n", encoding="utf-8")
 
+    # Capture host memory capacity (Linux): /proc/meminfo contains MemTotal.
+    try:
+        meminfo = Path("/proc/meminfo")
+        if meminfo.exists() and meminfo.is_file():
+            (info_dir / "meminfo.txt").write_text(meminfo.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    except Exception as e:
+        (info_dir / "meminfo.error.txt").write_text(str(e) + "\n", encoding="utf-8")
+
 
 def _capture_remote_lscpu(*, local_host_dir: Path, server: ServerConfig, dispatch_env: Optional[Dict[str, str]] = None) -> None:
     info_dir = (local_host_dir / "server_info").resolve()
@@ -1025,6 +1033,8 @@ def _capture_remote_lscpu(*, local_host_dir: Path, server: ServerConfig, dispatc
     run_capture("lscpu", "lscpu.txt")
     # JSON output is useful when present; ignore failures on older util-linux.
     run_capture("lscpu -J", "lscpu.json")
+    # Memory capacity (Linux): this includes MemTotal in kB.
+    run_capture("cat /proc/meminfo", "meminfo.txt")
 
 
 def _build_repo_bundle(*, out_path: Path) -> None:

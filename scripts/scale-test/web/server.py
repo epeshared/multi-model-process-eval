@@ -178,7 +178,63 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
     if cached and cached[0] == run.mtime:
         return cached[1]
 
-    meta: Dict[str, str] = {"model": "", "cpu": "", "cpu_cores": "", "mode": ""}
+    meta: Dict[str, str] = {"model": "", "cpu": "", "cpu_cores": "", "memory": "", "mode": ""}
+
+    def _fmt_mem_bytes(n: int) -> str:
+        if n <= 0:
+            return ""
+        gib = float(n) / float(1024 ** 3)
+        if gib >= 1024.0:
+            return f"{(gib / 1024.0):.2f} TiB"
+        return f"{gib:.1f} GiB"
+
+    def _parse_memtotal_bytes_from_meminfo(s: str) -> int:
+        try:
+            for line in (s or "").splitlines():
+                if line.lower().startswith("memtotal:"):
+                    m = re.search(r"MemTotal:\s*(\d+)\s*kB", line, re.IGNORECASE)
+                    if not m:
+                        continue
+                    kb = int(m.group(1))
+                    if kb > 0:
+                        return kb * 1024
+        except Exception:
+            return 0
+        return 0
+
+    def _parse_mem_bytes_from_lscpu_text(s: str) -> int:
+        # Newer util-linux may print a line like: "Memory: 1.5 TiB".
+        unit_pow = {
+            "b": 0,
+            "kb": 10,
+            "kib": 10,
+            "mb": 20,
+            "mib": 20,
+            "gb": 30,
+            "gib": 30,
+            "tb": 40,
+            "tib": 40,
+        }
+        try:
+            for line in (s or "").splitlines():
+                if not line.lower().startswith("memory:"):
+                    continue
+                _, _, tail = line.partition(":")
+                txt = tail.strip()
+                m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)", txt, re.IGNORECASE)
+                if not m:
+                    continue
+                val = float(m.group(1))
+                unit = m.group(2).lower()
+                p = unit_pow.get(unit)
+                if p is None:
+                    continue
+                n = int(val * (2 ** p))
+                if n > 0:
+                    return n
+        except Exception:
+            return 0
+        return 0
 
     def _cpu_model_from_lscpu_text(s: str) -> str:
         # Typical line: "Model name:                           Intel(R) Xeon(R) ..."
@@ -205,6 +261,27 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
                     meta["cpu"] = v
         except Exception:
             return
+
+    def _add_mem_from_server_info(base_dir: Path) -> None:
+        if meta.get("memory"):
+            return
+        try:
+            meminfo = (base_dir / "meminfo.txt").resolve()
+            if _is_within(meminfo, run.run_dir) and meminfo.exists() and meminfo.is_file():
+                n = _parse_memtotal_bytes_from_meminfo(_read_text(meminfo, max_bytes=256_000))
+                if n > 0:
+                    meta["memory"] = _fmt_mem_bytes(n)
+                    return
+        except Exception:
+            pass
+        try:
+            lscpu = (base_dir / "lscpu.txt").resolve()
+            if _is_within(lscpu, run.run_dir) and lscpu.exists() and lscpu.is_file():
+                n = _parse_mem_bytes_from_lscpu_text(_read_text(lscpu, max_bytes=256_000))
+                if n > 0:
+                    meta["memory"] = _fmt_mem_bytes(n)
+        except Exception:
+            pass
 
     # 1) model from aggregate.csv
     try:
@@ -290,11 +367,19 @@ def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
     # Prefer per-run server_info for local runs, else per-host server_info.
     try:
         _add_cpu_from_lscpu_path(run.run_dir / "server_info" / "lscpu.txt")
+        _add_mem_from_server_info(run.run_dir / "server_info")
         if not meta.get("cpu"):
             # Remote dispatch: <run>/hosts/<host>/server_info/lscpu.txt
             for p in sorted(run.run_dir.glob("hosts/*/server_info/lscpu.txt")):
                 _add_cpu_from_lscpu_path(p)
                 if meta.get("cpu"):
+                    break
+        if not meta.get("memory"):
+            for d in sorted(run.run_dir.glob("hosts/*/server_info")):
+                if not d.is_dir():
+                    continue
+                _add_mem_from_server_info(d)
+                if meta.get("memory"):
                     break
     except Exception:
         pass
@@ -307,13 +392,13 @@ def _apply_home_sort(runs: List[RunInfo], *, sort_spec: str) -> List[RunInfo]:
     """Stable multi-key sort for the home page.
 
     sort_spec: comma-separated keys, optionally prefixed with '-'.
-    Supported keys: task, suite, run, model, cpu, mtime
-    Default (empty/invalid): task,suite,run,model,cpu,mtime
+    Supported keys: task, suite, run, model, cpu, memory, mtime
+    Default (empty/invalid): task,suite,run,model,cpu,memory,mtime
     """
 
     spec = (sort_spec or "").strip()
     if not spec:
-        spec = "task,suite,run,model,cpu,mtime"
+        spec = "task,suite,run,model,cpu,memory,mtime"
 
     items: List[Tuple[str, bool]] = []
     alias = {
@@ -321,6 +406,8 @@ def _apply_home_sort(runs: List[RunInfo], *, sort_spec: str) -> List[RunInfo]:
         "time": "mtime",
         "cpu_model": "cpu",
         "cpu": "cpu",
+        "mem": "memory",
+        "ram": "memory",
     }
 
     for raw in [x.strip() for x in spec.split(",") if x.strip()]:
@@ -328,11 +415,11 @@ def _apply_home_sort(runs: List[RunInfo], *, sort_spec: str) -> List[RunInfo]:
         k = raw[1:] if desc else raw
         k = k.strip().lower()
         k2 = alias.get(k, k)
-        if k2 in {"task", "suite", "run", "model", "cpu", "mtime"}:
+        if k2 in {"task", "suite", "run", "model", "cpu", "memory", "mtime"}:
             items.append((k2, desc))
 
     if not items:
-        items = [("task", False), ("suite", False), ("run", False), ("model", False), ("cpu", False), ("mtime", False)]
+        items = [("task", False), ("suite", False), ("run", False), ("model", False), ("cpu", False), ("memory", False), ("mtime", False)]
 
     out = list(runs)
 
@@ -808,7 +895,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
     run_filter = (q.get("run") or [""])[0].strip()
     model_filter = (q.get("model") or [""])[0].strip()
     cpu_filter = (q.get("cpu") or [""])[0].strip()
-    sort_spec = (q.get("sort") or [""])[0].strip() or "task,suite,run,model,cpu,mtime"
+    sort_spec = (q.get("sort") or [""])[0].strip() or "task,suite,run,model,cpu,memory,mtime"
     limit_s = (q.get("limit") or ["50"])[0].strip()
     try:
         limit = max(1, min(500, int(limit_s)))
@@ -853,6 +940,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
         meta = _extract_run_meta(r)
         model = meta.get("model") or "-"
         cpu = meta.get("cpu") or "-"
+        memory = meta.get("memory") or "-"
         href = f"/run/{_e(r.ref.task)}/{_e(r.ref.suite)}/{_e(r.ref.run_id)}"
         run_key = f"{r.ref.task}/{r.ref.suite}/{r.ref.run_id}"
         rows.append(
@@ -863,6 +951,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
             f"<td><a href=\"{href}\">{_e(r.ref.run_id)}</a></td>"
             f"<td class=\"mono\">{_e(model)}</td>"
             f"<td class=\"mono\">{_e(cpu)}</td>"
+            f"<td class=\"mono\">{_e(memory)}</td>"
             f"<td class=\"mono\">{_e(_fmt_dt(r.mtime))}</td>"
             "</tr>"
         )
@@ -891,12 +980,13 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
     sort_bar = (
         '<div class="sub">'
         f"Sort: <span class=\"mono\">{_e(sort_spec)}</span> &nbsp;"
-        + f"<a href=\"{_q_href(sort='task,suite,run,model,cpu,mtime')}\">group</a> · "
+        + f"<a href=\"{_q_href(sort='task,suite,run,model,cpu,memory,mtime')}\">group</a> · "
         + f"<a href=\"{_q_href(sort='task')}\">task↑</a> · <a href=\"{_q_href(sort='-task')}\">task↓</a> · "
         + f"<a href=\"{_q_href(sort='suite')}\">suite↑</a> · <a href=\"{_q_href(sort='-suite')}\">suite↓</a> · "
         + f"<a href=\"{_q_href(sort='-mtime')}\">time↓</a> · <a href=\"{_q_href(sort='mtime')}\">time↑</a> · "
         + f"<a href=\"{_q_href(sort='model')}\">model↑</a> · <a href=\"{_q_href(sort='-model')}\">model↓</a> · "
-        + f"<a href=\"{_q_href(sort='cpu')}\">cpu↑</a> · <a href=\"{_q_href(sort='-cpu')}\">cpu↓</a>"
+        + f"<a href=\"{_q_href(sort='cpu')}\">cpu↑</a> · <a href=\"{_q_href(sort='-cpu')}\">cpu↓</a> · "
+        + f"<a href=\"{_q_href(sort='memory')}\">mem↑</a> · <a href=\"{_q_href(sort='-memory')}\">mem↓</a>"
         + "</div>"
     )
 
@@ -923,7 +1013,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
             <label>run <input name="run" value="{_e(run_filter)}" placeholder="20260210T..." /></label>
             <label>model <input name="model" value="{_e(model_filter)}" placeholder="qwen3-embedding-4b / Qwen3-Embedding-4B" /></label>
             <label>cpu <input name="cpu" value="{_e(cpu_filter)}" placeholder="Xeon / EPYC" /></label>
-            <label>sort <input name="sort" value="{_e(sort_spec)}" placeholder="task,suite,run,model,cpu,mtime" size="30" /></label>
+            <label>sort <input name="sort" value="{_e(sort_spec)}" placeholder="task,suite,run,model,cpu,memory,mtime" size="36" /></label>
       <label>limit <input name="limit" value="{_e(limit)}" size="4" /></label>
       <button type="submit">Filter</button>
       <a class="btn" href="/">Reset</a>
@@ -946,11 +1036,12 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
                     <th>run</th>
                     <th>model</th>
                     <th>cpu</th>
+                    <th>memory</th>
                     <th>mtime</th>
                 </tr>
             </thead>
             <tbody>
-                {''.join(rows) if rows else '<tr><td colspan="7" class="muted">No runs found.</td></tr>'}
+                {''.join(rows) if rows else '<tr><td colspan="8" class="muted">No runs found.</td></tr>'}
             </tbody>
         </table>
         <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -1239,6 +1330,434 @@ def _read_csv_dict_rows(path: Path, *, max_rows: int = 50_000) -> Tuple[List[str
                 break
             rows.append({k: ("" if v is None else str(v)) for k, v in r.items()})
     return fieldnames, rows
+
+
+def _build_compare_csv_export_xlsx(
+    *,
+    a_path: Path,
+    b_path: Path,
+    a_raw: str,
+    b_raw: str,
+    csv_name: str,
+    run_a: Optional[RunInfo] = None,
+    run_b: Optional[RunInfo] = None,
+) -> bytes:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.chart import LineChart, Reference
+        from openpyxl.formatting.rule import ColorScaleRule
+        from openpyxl.utils import get_column_letter
+    except Exception as e:
+        raise RuntimeError(f"openpyxl is required for XLSX export: {e}")
+
+    if not a_path.exists() or not b_path.exists():
+        raise RuntimeError("Both A and B CSV files are required for export")
+
+    a_cols, a_rows = _read_csv_dict_rows(a_path)
+    b_cols, b_rows = _read_csv_dict_rows(b_path)
+    cols = [c for c in a_cols if c in set(b_cols)]
+    if not cols:
+        cols = list(dict.fromkeys(a_cols + b_cols))
+
+    def _median(vals: List[float]) -> Optional[float]:
+        if not vals:
+            return None
+        s = sorted(vals)
+        n = len(s)
+        m = n // 2
+        if n % 2 == 1:
+            return s[m]
+        return (s[m - 1] + s[m]) / 2.0
+
+    def _safe_sheet_name(name: str) -> str:
+        bad = set('[]:*?/\\')
+        out = "".join(ch if ch not in bad else "_" for ch in (name or "sheet"))
+        out = out.strip() or "sheet"
+        return out[:31]
+
+    def _write_rows(ws: Any, rows: List[List[Any]]) -> None:
+        for row in rows:
+            ws.append(row)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    meta_a = _extract_run_meta(run_a) if run_a is not None else {}
+    meta_b = _extract_run_meta(run_b) if run_b is not None else {}
+
+    ws_info = wb.create_sheet("Info")
+    _write_rows(
+        ws_info,
+        [
+            ["field", "value"],
+            ["export_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            ["csv", csv_name],
+            ["A", a_raw],
+            ["B", b_raw],
+            ["A_cpu", meta_a.get("cpu", "")],
+            ["B_cpu", meta_b.get("cpu", "")],
+            ["A_memory", meta_a.get("memory", "")],
+            ["B_memory", meta_b.get("memory", "")],
+            ["A_path", str(a_path)],
+            ["B_path", str(b_path)],
+            ["A_rows", len(a_rows)],
+            ["B_rows", len(b_rows)],
+            ["common_cols", len(cols)],
+        ],
+    )
+
+    def _server_info_rows(run: Optional[RunInfo]) -> List[List[Any]]:
+        rows: List[List[Any]] = [["host_tag", "host_label", "cpu_model", "memory", "lscpu_path", "meminfo_path"]]
+        if run is None:
+            rows.append(["", "", "", "", "", ""])
+            return rows
+
+        def _cpu_model_from_lscpu_text(s: str) -> str:
+            try:
+                for line in (s or "").splitlines():
+                    if line.lower().startswith("model name"):
+                        _, _, tail = line.partition(":")
+                        v = tail.strip()
+                        if v:
+                            return v
+            except Exception:
+                return ""
+            return ""
+
+        def _mem_from_meminfo(s: str) -> str:
+            try:
+                for line in (s or "").splitlines():
+                    if line.lower().startswith("memtotal:"):
+                        m = re.search(r"MemTotal:\s*(\d+)\s*kB", line, re.IGNORECASE)
+                        if not m:
+                            continue
+                        kb = int(m.group(1))
+                        gib = kb / (1024.0 * 1024.0)
+                        return f"{gib:.1f} GiB"
+            except Exception:
+                return ""
+            return ""
+
+        def _mem_from_lscpu(s: str) -> str:
+            try:
+                for line in (s or "").splitlines():
+                    if line.lower().startswith("memory:"):
+                        _, _, tail = line.partition(":")
+                        return tail.strip()
+            except Exception:
+                return ""
+            return ""
+
+        hosts = _list_server_info_hosts(run)
+        if not hosts:
+            rows.append(["", "", "", "", "", ""])
+            return rows
+
+        for it in hosts:
+            tag = str(it.get("tag") or "")
+            label = str(it.get("label") or tag)
+            base_rel = str(it.get("base_rel") or "")
+            lscpu_p = (run.run_dir / base_rel / "lscpu.txt").resolve()
+            meminfo_p = (run.run_dir / base_rel / "meminfo.txt").resolve()
+            cpu_model = ""
+            mem = ""
+            if _is_within(lscpu_p, run.run_dir) and lscpu_p.exists() and lscpu_p.is_file():
+                txt = _read_text(lscpu_p, max_bytes=256_000)
+                cpu_model = _cpu_model_from_lscpu_text(txt)
+                if not mem:
+                    mem = _mem_from_lscpu(txt)
+            if _is_within(meminfo_p, run.run_dir) and meminfo_p.exists() and meminfo_p.is_file():
+                mtxt = _read_text(meminfo_p, max_bytes=128_000)
+                m2 = _mem_from_meminfo(mtxt)
+                if m2:
+                    mem = m2
+            rows.append([tag, label, cpu_model, mem, str(lscpu_p), str(meminfo_p)])
+        return rows
+
+    ws_srv_a = wb.create_sheet("ServerInfo_A")
+    _write_rows(ws_srv_a, _server_info_rows(run_a))
+    ws_srv_b = wb.create_sheet("ServerInfo_B")
+    _write_rows(ws_srv_b, _server_info_rows(run_b))
+
+    # Build the same compare table logic used by /compare-csv.
+    dim_force = {
+        "variant",
+        "resource_cpu",
+        "resource_cpu_count",
+        "resource_mem_gb",
+        "cpu_count",
+        "batch_size",
+        "token_len",
+        "kv_cap",
+        "sglang_max_total_tokens",
+    }
+
+    def is_numeric_col(name: str) -> bool:
+        vs: List[str] = []
+        for r in a_rows[:200]:
+            v = r.get(name, "")
+            if v:
+                vs.append(v)
+        for r in b_rows[:200]:
+            v = r.get(name, "")
+            if v:
+                vs.append(v)
+        if not vs:
+            return False
+        ok = sum(1 for v in vs if _try_float(v) is not None)
+        return (ok / max(1, len(vs))) >= 0.85
+
+    numeric_cols = {c for c in cols if is_numeric_col(c)}
+    metrics = [c for c in cols if (c in numeric_cols and c not in dim_force)]
+    candidate_key_cols = [c for c in cols if c not in set(metrics)]
+    ab_only_cols = [c for c in ["resource_cpu", "resource_cpu_count", "cpu_count"] if c in cols]
+    candidate_key_cols = [c for c in candidate_key_cols if c not in set(ab_only_cols)]
+
+    volatile_name_re = re.compile(
+        r"(path|file|dir|folder|artifact|output|stdout|stderr|log|xlsx|html|json|csv)$",
+        re.IGNORECASE,
+    )
+    volatile_exact = {
+        "emon_summary_xlsx",
+        "auto_test_stdout_log",
+        "auto_test_stderr_log",
+        "run_dir",
+        "run_path",
+        "summary_xlsx",
+    }
+
+    def looks_like_path(v: str) -> bool:
+        s = (v or "").strip()
+        if not s:
+            return False
+        if "/" in s or "\\" in s or s.startswith("http://") or s.startswith("https://"):
+            return True
+        lower = s.lower()
+        return any(lower.endswith(ext) for ext in (".xlsx", ".csv", ".json", ".html", ".log", ".txt", ".png"))
+
+    def is_volatile_key_col(name: str) -> bool:
+        n = (name or "").strip()
+        if not n:
+            return True
+        if n in volatile_exact:
+            return True
+        if volatile_name_re.search(n):
+            return True
+        sample: List[str] = []
+        for r in a_rows[:200]:
+            v = (r.get(n) or "").strip()
+            if v:
+                sample.append(v)
+        for r in b_rows[:200]:
+            v = (r.get(n) or "").strip()
+            if v:
+                sample.append(v)
+        if not sample:
+            return False
+        pathish = sum(1 for v in sample if looks_like_path(v))
+        return (pathish / max(1, len(sample))) >= 0.60
+
+    key_cols = [c for c in candidate_key_cols if not is_volatile_key_col(c)]
+    if not key_cols:
+        key_cols = candidate_key_cols
+
+    def row_key(r: Dict[str, str], *, i: int) -> Tuple[str, ...]:
+        if not key_cols:
+            return (str(i),)
+        return tuple((r.get(c, "") or "").strip() for c in key_cols)
+
+    a_idx: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    for i, r in enumerate(a_rows):
+        a_idx[row_key(r, i=i)] = r
+    b_idx: Dict[Tuple[str, ...], Dict[str, str]] = {}
+    for i, r in enumerate(b_rows):
+        b_idx[row_key(r, i=i)] = r
+    keys = sorted(set(a_idx.keys()) | set(b_idx.keys()))
+
+    ws_cmp = wb.create_sheet("Comparison")
+    cmp_head: List[str] = list(key_cols)
+    for c in ab_only_cols:
+        cmp_head.extend([f"{c}_A", f"{c}_B"])
+    for c in metrics:
+        cmp_head.extend([f"A_{c}", f"B_{c}", f"delta_{c}%"])
+    ws_cmp.append(cmp_head)
+
+    for k in keys[:50_000]:
+        ar = a_idx.get(k) or {}
+        br = b_idx.get(k) or {}
+        row: List[Any] = []
+        for j, _ in enumerate(key_cols):
+            row.append(k[j] if j < len(k) else "")
+        for c in ab_only_cols:
+            row.append((ar.get(c, "") or "").strip())
+            row.append((br.get(c, "") or "").strip())
+        for c in metrics:
+            av = _try_float((ar.get(c, "") or "").strip())
+            bv = _try_float((br.get(c, "") or "").strip())
+            row.append(av)
+            row.append(bv)
+            row.append(_cmp_pct(av, bv))
+        ws_cmp.append(row)
+
+    ws_raw_a = wb.create_sheet(_safe_sheet_name("Raw_A"))
+    ws_raw_b = wb.create_sheet(_safe_sheet_name("Raw_B"))
+    ws_raw_a.append(a_cols)
+    for r in a_rows[:100_000]:
+        ws_raw_a.append([r.get(c, "") for c in a_cols])
+    ws_raw_b.append(b_cols)
+    for r in b_rows[:100_000]:
+        ws_raw_b.append([r.get(c, "") for c in b_cols])
+
+    # Export auto-plot data and create line charts for scaling CSVs.
+    stem = Path(csv_name).stem
+    prefix = stem[:-8] if stem.endswith("_scaling") else stem
+    x_candidates = [prefix]
+    if "_" in prefix:
+        x_candidates.append(prefix.split("_", 1)[0])
+    x_col = next((c for c in x_candidates if c in cols), "")
+    if not x_col and prefix == "cpu" and "cpu_count" in cols:
+        x_col = "cpu_count"
+    y_col = "tps" if "tps" in cols else ("tokens_per_sec" if "tokens_per_sec" in cols else "")
+
+    if stem.endswith("_scaling") and x_col and y_col:
+        split_pref: Dict[str, List[str]] = {
+            "batch_size": ["token_len", "cpu_count", "kv_cap"],
+            "token_len": ["batch_size", "cpu_count", "kv_cap"],
+            "cpu_count": ["token_len", "batch_size", "kv_cap"],
+            "kv_cap": ["token_len", "batch_size", "cpu_count"],
+        }
+        split_candidates = split_pref.get(x_col, ["token_len", "batch_size", "cpu_count", "kv_cap"])
+        split_col = ""
+        for c in split_candidates:
+            if c == x_col or c not in cols:
+                continue
+            vals = set()
+            for r in (a_rows[:800] + b_rows[:800]):
+                v = (r.get(c, "") or "").strip()
+                if v:
+                    vals.add(v)
+            if len(vals) > 1:
+                split_col = c
+                break
+
+        split_values = [""]
+        if split_col:
+            vals = set((r.get(split_col, "") or "").strip() for r in (a_rows + b_rows))
+            vals.discard("")
+
+            def _sort_key(s: str) -> Tuple[int, float, str]:
+                f = _try_float(s)
+                if f is None:
+                    return (1, 0.0, s)
+                return (0, float(f), s)
+
+            split_values = sorted(vals, key=_sort_key)[:6]
+
+        ws_plot = wb.create_sheet("AutoPlotData")
+        ws_plot.append(["split", x_col, "A_median", "B_median", "A_n", "B_n"])
+
+        def _series(rows: List[Dict[str, str]], split_value: str = "") -> List[Tuple[float, float, int]]:
+            groups: Dict[float, List[float]] = {}
+            for r in rows:
+                if split_col:
+                    sv = (r.get(split_col, "") or "").strip()
+                    if sv != split_value:
+                        continue
+                xv = _try_float((r.get(x_col, "") or "").strip())
+                yv = _try_float((r.get(y_col, "") or "").strip())
+                if xv is None or yv is None:
+                    continue
+                groups.setdefault(float(xv), []).append(float(yv))
+            out: List[Tuple[float, float, int]] = []
+            for xv in sorted(groups.keys()):
+                vals = groups.get(xv, [])
+                m = _median(vals)
+                if m is not None:
+                    out.append((xv, m, len(vals)))
+            return out
+
+        row0 = 2
+        chart_meta: List[Tuple[str, int, int]] = []
+        for sv in split_values:
+            a_line = _series(a_rows, sv)
+            b_line = _series(b_rows, sv)
+            if not a_line and not b_line:
+                continue
+            xvals = sorted(set([x for x, _, _ in a_line] + [x for x, _, _ in b_line]))
+            a_map = {x: (y, n) for x, y, n in a_line}
+            b_map = {x: (y, n) for x, y, n in b_line}
+            start = row0
+            for x in xvals:
+                ay, an = a_map.get(x, (None, 0))
+                by, bn = b_map.get(x, (None, 0))
+                ws_plot.append([sv if split_col else "all", x, ay, by, an, bn])
+                row0 += 1
+            end = row0 - 1
+            chart_meta.append((sv if split_col else "all", start, end))
+            row0 += 1
+
+        ws_chart = wb.create_sheet("AutoPlotChart")
+        ws_chart.append([f"x={x_col}", f"y={y_col} (median)", f"facet={split_col or 'none'}"])
+        anchor_row = 3
+        for sv, start, end in chart_meta:
+            chart = LineChart()
+            chart.title = f"{split_col}={sv}" if split_col else "all"
+            chart.y_axis.title = y_col
+            chart.x_axis.title = x_col
+            cats = Reference(ws_plot, min_col=2, min_row=start, max_row=end)
+            data_a = Reference(ws_plot, min_col=3, min_row=start - 1, max_row=end)
+            data_b = Reference(ws_plot, min_col=4, min_row=start - 1, max_row=end)
+            chart.add_data(data_a, titles_from_data=True)
+            chart.add_data(data_b, titles_from_data=True)
+            chart.set_categories(cats)
+            ws_chart.add_chart(chart, f"A{anchor_row}")
+            anchor_row += 16
+
+    # Export batch_size x token_len TPS delta matrix and apply heatmap formatting.
+    if {"batch_size", "token_len", "tps"}.issubset(set(cols)):
+        def _agg(rows: List[Dict[str, str]]) -> Dict[Tuple[float, float], float]:
+            g: Dict[Tuple[float, float], List[float]] = {}
+            for r in rows:
+                bs = _try_float((r.get("batch_size", "") or "").strip())
+                tl = _try_float((r.get("token_len", "") or "").strip())
+                tps = _try_float((r.get("tps", "") or "").strip())
+                if bs is None or tl is None or tps is None:
+                    continue
+                g.setdefault((float(bs), float(tl)), []).append(float(tps))
+            out: Dict[Tuple[float, float], float] = {}
+            for k, vals in g.items():
+                m = _median(vals)
+                if m is not None:
+                    out[k] = m
+            return out
+
+        amap = _agg(a_rows)
+        bmap = _agg(b_rows)
+        keys2 = sorted(set(amap.keys()) | set(bmap.keys()), key=lambda k: (k[1], k[0]))
+        if keys2:
+            batches = sorted(set(k[0] for k in keys2))
+            tokens = sorted(set(k[1] for k in keys2))
+            ws_hm = wb.create_sheet("BatchTokenDelta")
+            ws_hm.append(["token_len\\batch_size"] + [f"{x:g}" for x in batches])
+            for tl in tokens:
+                row = [f"{tl:g}"]
+                for bs in batches:
+                    row.append(_cmp_pct(amap.get((bs, tl)), bmap.get((bs, tl))))
+                ws_hm.append(row)
+            if len(tokens) >= 1 and len(batches) >= 1:
+                start = "B2"
+                end_col = get_column_letter(1 + len(batches))
+                end = f"{end_col}{1 + len(tokens)}"
+                ws_hm.conditional_formatting.add(
+                    f"{start}:{end}",
+                    ColorScaleRule(start_type="num", start_value=-50, start_color="F4D03F", mid_type="num", mid_value=0, mid_color="1B2631", end_type="num", end_value=50, end_color="2ECC71"),
+                )
+
+    from io import BytesIO
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 def _render_csv_tps_scatter_compare(
@@ -2216,6 +2735,7 @@ def _render_compare_csv(scale_test_root: Path, runs: List[RunInfo], q: Dict[str,
     b_href = f"/run/{_e(run_b.ref.task)}/{_e(run_b.ref.suite)}/{_e(run_b.ref.run_id)}"
 
     swap_href = f"/compare-csv?a={quote(b_raw)}&b={quote(a_raw)}&csv={quote(csv_name)}"
+    export_href = f"/compare-csv-export.xlsx?a={quote(a_raw)}&b={quote(b_raw)}&csv={quote(csv_name)}"
 
     a_meta = _extract_run_meta(run_a)
     b_meta = _extract_run_meta(run_b)
@@ -2247,6 +2767,7 @@ def _render_compare_csv(scale_test_root: Path, runs: List[RunInfo], q: Dict[str,
         f'<div style="margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">'
         f'<a class="btn" href="{back_href}">Back to CSV list</a>'
         f'<a class="btn" href="{swap_href}">Swap A/B</a>'
+        f'<a class="btn" href="{export_href}">Download XLSX</a>'
         '</div>'
         f'<div class="sub">A cpu: <span class="mono">{_e(a_cpu)}{_e(a_cores_txt)}</span></div>'
         f'<div class="sub">B cpu: <span class="mono">{_e(b_cpu)}{_e(b_cores_txt)}</span></div>'
@@ -2347,10 +2868,12 @@ def _render_server_info(scale_test_root: Path, run: RunInfo, q: Dict[str, List[s
         base_rel = str(it.get("base_rel") or "")
         lscpu_rel = f"{base_rel}/lscpu.txt"
         lscpuj_rel = f"{base_rel}/lscpu.json"
+        meminfo_rel = f"{base_rel}/meminfo.txt"
 
         view = f"/server-info/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(tag)}"
         dl_txt = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(lscpu_rel)}"
         dl_json = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(lscpuj_rel)}"
+        dl_mem = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(meminfo_rel)}"
         rows.append(
             "<tr>"
             f"<td class=\"mono\">{_e(tag)}</td>"
@@ -2358,13 +2881,14 @@ def _render_server_info(scale_test_root: Path, run: RunInfo, q: Dict[str, List[s
             f"<td><a href=\"{view}\">View</a></td>"
             f"<td><a href=\"{dl_txt}\" target=\"_blank\">lscpu.txt</a></td>"
             f"<td><a href=\"{dl_json}\" target=\"_blank\">lscpu.json</a></td>"
+            f"<td><a href=\"{dl_mem}\" target=\"_blank\">meminfo.txt</a></td>"
             "</tr>"
         )
 
     host_table = (
         "<table class=\"table\">"
-        "<thead><tr><th>tag</th><th>label</th><th>page</th><th>download</th><th>download</th></tr></thead>"
-        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=\"5\" class=\"muted\">No server_info found.</td></tr>'}</tbody>"
+        "<thead><tr><th>tag</th><th>label</th><th>page</th><th>download</th><th>download</th><th>download</th></tr></thead>"
+        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=\"6\" class=\"muted\">No server_info found.</td></tr>'}</tbody>"
         "</table>"
     )
 
@@ -2946,6 +3470,47 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html_text, content_type="text/html; charset=utf-8")
             return
 
+        if path == "/compare-csv-export.xlsx":
+            a_raw = (q.get("a") or [""])[0].strip()
+            b_raw = (q.get("b") or [""])[0].strip()
+            csv_name = (q.get("csv") or [""])[0].strip()
+            a_ref = _parse_run_key(a_raw)
+            b_ref = _parse_run_key(b_raw)
+            if not (a_ref and b_ref and csv_name):
+                self._send(400, "Missing parameters. Need: a, b, csv.\n", content_type="text/plain")
+                return
+            run_a = srv.get_run(a_ref.task, a_ref.suite, a_ref.run_id)
+            run_b = srv.get_run(b_ref.task, b_ref.suite, b_ref.run_id)
+            if run_a is None or run_b is None:
+                self._send(404, "Run not found\n", content_type="text/plain")
+                return
+            a_p = (run_a.analysis_dir / csv_name).resolve()
+            b_p = (run_b.analysis_dir / csv_name).resolve()
+            if not (_is_within(a_p, run_a.run_dir) and _is_within(b_p, run_b.run_dir)):
+                self._send(403, "Forbidden\n", content_type="text/plain")
+                return
+            try:
+                payload = _build_compare_csv_export_xlsx(
+                    a_path=a_p,
+                    b_path=b_p,
+                    a_raw=a_raw,
+                    b_raw=b_raw,
+                    csv_name=csv_name,
+                    run_a=run_a,
+                    run_b=run_b,
+                )
+            except Exception as e:
+                self._send(500, f"Export failed: {e}\n", content_type="text/plain")
+                return
+            dl = _sanitize_download_name(f"compare_{Path(csv_name).stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", default_ext=".xlsx")
+            self._send_bytes(
+                200,
+                payload,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                download_name=dl,
+            )
+            return
+
         if path.startswith("/static/"):
             rel = path[len("/static/") :]
             file_path = (WEB_DIR / "static" / rel).resolve()
@@ -3103,6 +3668,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_bytes(self, code: int, data: bytes, *, content_type: str, download_name: Optional[str] = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        if download_name:
+            safe = _sanitize_download_name(download_name, default_ext=".xlsx")
+            self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
         self.end_headers()
         self.wfile.write(data)
 
