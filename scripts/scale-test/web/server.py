@@ -1241,6 +1241,539 @@ def _read_csv_dict_rows(path: Path, *, max_rows: int = 50_000) -> Tuple[List[str
     return fieldnames, rows
 
 
+def _render_csv_tps_scatter_compare(
+    *,
+    a_path: Path,
+    b_path: Path,
+    csv_name: str,
+    max_points_each: int = 2000,
+) -> str:
+    if not a_path.exists() and not b_path.exists():
+        return '<div class="muted">Scatter unavailable: missing in both A and B.</div>'
+    if not a_path.exists() or not b_path.exists():
+        return '<div class="muted">Scatter unavailable: only one side has this CSV.</div>'
+
+    a_cols, a_rows = _read_csv_dict_rows(a_path)
+    b_cols, b_rows = _read_csv_dict_rows(b_path)
+    if not a_cols or not b_cols:
+        return '<div class="muted">Scatter unavailable: empty CSV.</div>'
+
+    cols = [c for c in a_cols if c in set(b_cols)]
+    if not cols:
+        cols = list(dict.fromkeys(a_cols + b_cols))
+
+    stem = Path(csv_name).stem
+    prefix = stem[:-8] if stem.endswith("_scaling") else stem
+
+    def _median(vals: List[float]) -> Optional[float]:
+        if not vals:
+            return None
+        s = sorted(vals)
+        n = len(s)
+        m = n // 2
+        if n % 2 == 1:
+            return s[m]
+        return (s[m - 1] + s[m]) / 2.0
+
+    # Infer x-axis from filename first token group, e.g. batch_size_scaling.csv -> batch_size.
+    x_candidates = [prefix]
+    if "_" in prefix:
+        x_candidates.append(prefix.split("_", 1)[0])
+    x_col = next((c for c in x_candidates if c in cols), "")
+    if not x_col and prefix == "cpu" and "cpu_count" in cols:
+        x_col = "cpu_count"
+
+    if not x_col:
+        expected = ", ".join([c for c in x_candidates if c])
+        return (
+            '<div class="muted">Scatter unavailable: cannot infer x-axis column from filename. '
+            f'Expected one of <span class="mono">{_e(expected)}</span>.</div>'
+        )
+
+    y_col = "tps" if "tps" in cols else ("tokens_per_sec" if "tokens_per_sec" in cols else "")
+
+    # summary_pivot.csv: compare each *_tps scenario using grouped bars.
+    if stem == "summary_pivot":
+        tps_cols = [c for c in cols if c.endswith("_tps") and not c.endswith("_tps_per_cpu")]
+        if not tps_cols:
+            return '<div class="muted">No *_tps columns found in summary_pivot.csv.</div>'
+
+        def _summary_vals(rows: List[Dict[str, str]]) -> Dict[str, float]:
+            out: Dict[str, float] = {}
+            for c in tps_cols:
+                vals: List[float] = []
+                for r in rows:
+                    v = _try_float((r.get(c, "") or "").strip())
+                    if v is not None:
+                        vals.append(v)
+                m = _median(vals)
+                if m is not None:
+                    out[c] = m
+            return out
+
+        a_vals = _summary_vals(a_rows)
+        b_vals = _summary_vals(b_rows)
+        cats = [c for c in tps_cols if c in a_vals or c in b_vals]
+        cats = cats[:18]
+        if not cats:
+            return '<div class="muted">No numeric values found for summary_pivot *_tps columns.</div>'
+
+        y_values: List[float] = []
+        for c in cats:
+            if c in a_vals:
+                y_values.append(a_vals[c])
+            if c in b_vals:
+                y_values.append(b_vals[c])
+
+        y_min = 0.0
+        y_max = max(y_values) if y_values else 1.0
+        if y_max <= y_min:
+            y_max = y_min + 1.0
+
+        width = 1100
+        height = 420
+        ml, mr, mt, mb = 72, 20, 20, 90
+        pw = max(1, width - ml - mr)
+        ph = max(1, height - mt - mb)
+
+        def sy(y: float) -> float:
+            return mt + (y_max - y) * ph / (y_max - y_min)
+
+        n = len(cats)
+        band = pw / max(1, n)
+        bw = max(3.0, min(16.0, band * 0.32))
+
+        ticks = 5
+        grid: List[str] = []
+        for i in range(ticks + 1):
+            yy = mt + ph * i / ticks
+            yv = y_max - (y_max - y_min) * i / ticks
+            grid.append(f'<line x1="{ml}" y1="{yy:.2f}" x2="{ml + pw}" y2="{yy:.2f}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+            grid.append(f'<text x="{ml - 8}" y="{yy + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(f"{yv:.4g}")}</text>')
+
+        bars: List[str] = []
+        labels: List[str] = []
+        for i, c in enumerate(cats):
+            cx = ml + (i + 0.5) * band
+            av = a_vals.get(c)
+            bv = b_vals.get(c)
+            if av is not None:
+                ay = sy(av)
+                h = mt + ph - ay
+                bars.append(
+                    f'<rect x="{cx - bw - 1:.2f}" y="{ay:.2f}" width="{bw:.2f}" height="{h:.2f}" fill="var(--accent)" fill-opacity="0.88">'
+                    f'<title>A | {c} | {av:.6g}</title></rect>'
+                )
+            if bv is not None:
+                by = sy(bv)
+                h = mt + ph - by
+                bars.append(
+                    f'<rect x="{cx + 1:.2f}" y="{by:.2f}" width="{bw:.2f}" height="{h:.2f}" fill="var(--accent2)" fill-opacity="0.88">'
+                    f'<title>B | {c} | {bv:.6g}</title></rect>'
+                )
+            short = c.replace("_tps", "")
+            labels.append(
+                f'<text x="{cx:.2f}" y="{height - 12}" fill="var(--muted)" font-size="10" text-anchor="end" transform="rotate(-35,{cx:.2f},{height - 12})">{_e(short)}</text>'
+            )
+
+        axis = (
+            f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+            f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+        )
+
+        svg = (
+            f'<svg viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="A/B summary pivot tps bars">'
+            f'{"".join(grid)}{axis}{"".join(bars)}{"".join(labels)}'
+            f'<text x="{ml + pw / 2:.2f}" y="{height - 36}" fill="var(--muted)" font-size="12" text-anchor="middle">scenario (from *_tps columns)</text>'
+            f'<text x="16" y="{mt + ph / 2:.2f}" fill="var(--muted)" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + ph / 2:.2f})">tps</text>'
+            '</svg>'
+        )
+        legend = (
+            '<div class="sub"><span style="color: var(--accent)">●</span> A median &nbsp; '
+            '<span style="color: var(--accent2)">●</span> B median &nbsp; '
+            f'· scenarios shown: <span class="mono">{len(cats)}</span></div>'
+        )
+        return f'<div class="plot"><div class="plot-title">Summary Pivot TPS Compare</div>{legend}{svg}</div>'
+
+    if not y_col:
+        return '<div class="muted">Scatter unavailable: missing y-axis column <span class="mono">tps</span>.</div>'
+
+    # *_scaling.csv: use faceted line charts so secondary dimensions (e.g. token_len)
+    # are not collapsed into a single median curve.
+    if stem.endswith("_scaling") and x_col:
+        split_pref: Dict[str, List[str]] = {
+            "batch_size": ["token_len", "cpu_count", "kv_cap"],
+            "token_len": ["batch_size", "cpu_count", "kv_cap"],
+            "cpu_count": ["token_len", "batch_size", "kv_cap"],
+            "kv_cap": ["token_len", "batch_size", "cpu_count"],
+        }
+        split_candidates = split_pref.get(x_col, ["token_len", "batch_size", "cpu_count", "kv_cap"])
+        split_col = ""
+        for c in split_candidates:
+            if c == x_col or c not in cols:
+                continue
+            vals = set()
+            for r in (a_rows[:800] + b_rows[:800]):
+                v = (r.get(c, "") or "").strip()
+                if v:
+                    vals.add(v)
+            if len(vals) > 1:
+                split_col = c
+                break
+
+        def _series(rows: List[Dict[str, str]], split_value: str = "") -> List[Tuple[float, float, int]]:
+            groups: Dict[float, List[float]] = {}
+            for r in rows:
+                if split_col:
+                    sv = (r.get(split_col, "") or "").strip()
+                    if sv != split_value:
+                        continue
+                xv = _try_float((r.get(x_col, "") or "").strip())
+                yv = _try_float((r.get(y_col, "") or "").strip())
+                if xv is None or yv is None:
+                    continue
+                groups.setdefault(float(xv), []).append(float(yv))
+            out: List[Tuple[float, float, int]] = []
+            for xv in sorted(groups.keys()):
+                vals = groups.get(xv, [])
+                m = _median(vals)
+                if m is None:
+                    continue
+                out.append((xv, m, len(vals)))
+            return out
+
+        split_values = [""]
+        if split_col:
+            vals = set()
+            for r in (a_rows + b_rows):
+                v = (r.get(split_col, "") or "").strip()
+                if v:
+                    vals.add(v)
+
+            def _sort_key(s: str) -> Tuple[int, float, str]:
+                f = _try_float(s)
+                if f is None:
+                    return (1, 0.0, s)
+                return (0, float(f), s)
+
+            split_values = sorted(vals, key=_sort_key)[:6]
+
+        facet_blocks: List[str] = []
+        for sv in split_values:
+            a_line = _series(a_rows, sv)
+            b_line = _series(b_rows, sv)
+            if not a_line and not b_line:
+                continue
+
+            all_x = [x for x, _, _ in a_line] + [x for x, _, _ in b_line]
+            all_y = [y for _, y, _ in a_line] + [y for _, y, _ in b_line]
+            x_min, x_max = min(all_x), max(all_x)
+            y_min, y_max = min(all_y), max(all_y)
+            if x_min == x_max:
+                x_min -= 0.5
+                x_max += 0.5
+            if y_min == y_max:
+                pad = max(1.0, abs(y_min) * 0.1)
+                y_min -= pad
+                y_max += pad
+
+            width = 1000
+            height = 340
+            ml, mr, mt, mb = 64, 20, 20, 44
+            pw = max(1, width - ml - mr)
+            ph = max(1, height - mt - mb)
+
+            def sx(x: float) -> float:
+                return ml + (x - x_min) * pw / (x_max - x_min)
+
+            def sy(y: float) -> float:
+                return mt + (y_max - y) * ph / (y_max - y_min)
+
+            grid: List[str] = []
+            ticks = 5
+            for i in range(ticks + 1):
+                tx = ml + pw * i / ticks
+                ty = mt + ph * i / ticks
+                xv = x_min + (x_max - x_min) * i / ticks
+                yv = y_max - (y_max - y_min) * i / ticks
+                grid.append(f'<line x1="{tx:.2f}" y1="{mt}" x2="{tx:.2f}" y2="{mt + ph}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+                grid.append(f'<line x1="{ml}" y1="{ty:.2f}" x2="{ml + pw}" y2="{ty:.2f}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+                grid.append(f'<text x="{tx:.2f}" y="{height - 10}" fill="var(--muted)" font-size="11" text-anchor="middle">{_e(f"{xv:.4g}")}</text>')
+                grid.append(f'<text x="{ml - 8}" y="{ty + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(f"{yv:.4g}")}</text>')
+
+            def _poly(series: List[Tuple[float, float, int]], color: str, tag: str) -> str:
+                if not series:
+                    return ""
+                pts = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for x, y, _ in series)
+                circles = []
+                for x, y, n in series:
+                    circles.append(
+                        f'<circle cx="{sx(x):.2f}" cy="{sy(y):.2f}" r="3.4" fill="{color}" fill-opacity="0.9">'
+                        f'<title>{tag} | {x_col}={x:.6g}, median {y_col}={y:.6g}, n={n}</title></circle>'
+                    )
+                return f'<polyline fill="none" stroke="{color}" stroke-width="2.2" points="{pts}" />' + "".join(circles)
+
+            axis = (
+                f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+                f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+            )
+            svg = (
+                f'<svg viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="A/B scaling line compare">'
+                f'{"".join(grid)}{axis}{_poly(a_line, "var(--accent)", "A")}{_poly(b_line, "var(--accent2)", "B")}'
+                f'<text x="{ml + pw / 2:.2f}" y="{height - 24}" fill="var(--muted)" font-size="12" text-anchor="middle">{_e(x_col)}</text>'
+                f'<text x="16" y="{mt + ph / 2:.2f}" fill="var(--muted)" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + ph / 2:.2f})">{_e(y_col)} (median)</text>'
+                '</svg>'
+            )
+            facet_title = f'{split_col}={sv}' if split_col else 'all rows'
+            facet_blocks.append(
+                '<div class="plot">'
+                f'<div class="plot-title">Scaling Line Compare · {_e(facet_title)}</div>'
+                f'{svg}'
+                '</div>'
+            )
+
+        if facet_blocks:
+            legend = (
+                f'<div class="sub">x-axis: <span class="mono">{_e(x_col)}</span> · y-axis: <span class="mono">{_e(y_col)}</span> (median by x)</div>'
+                + (f'<div class="sub">facets by <span class="mono">{_e(split_col)}</span> (up to 6)</div>' if split_col else '')
+                + '<div class="sub"><span style="color: var(--accent)">●</span> A &nbsp; <span style="color: var(--accent2)">●</span> B</div>'
+            )
+            return f'<div>{legend}<div class="plots">{"".join(facet_blocks)}</div></div>'
+
+    def _collect_points(rows: List[Dict[str, str]], tag: str) -> List[Tuple[float, float, str]]:
+        pts: List[Tuple[float, float, str]] = []
+        for r in rows:
+            xv = _try_float((r.get(x_col, "") or "").strip())
+            yv = _try_float((r.get(y_col, "") or "").strip())
+            if xv is None or yv is None:
+                continue
+            detail = []
+            for k in cols:
+                if k in {x_col, y_col}:
+                    continue
+                vv = (r.get(k, "") or "").strip()
+                if vv:
+                    detail.append(f"{k}={vv}")
+            hover = f"{tag} | {x_col}={xv:.6g}, {y_col}={yv:.6g}"
+            if detail:
+                hover += " | " + ", ".join(detail[:6])
+            pts.append((xv, yv, hover))
+        if len(pts) <= max_points_each:
+            return pts
+        # Uniform downsample to keep page responsive.
+        step = max(1, len(pts) // max_points_each)
+        return pts[::step][:max_points_each]
+
+    a_pts = _collect_points(a_rows, "A")
+    b_pts = _collect_points(b_rows, "B")
+    if not a_pts and not b_pts:
+        return '<div class="muted">Scatter unavailable: no valid numeric points for inferred axes.</div>'
+
+    all_pts = a_pts + b_pts
+    xs = [p[0] for p in all_pts]
+    ys = [p[1] for p in all_pts]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+
+    if x_min == x_max:
+        x_min -= 0.5
+        x_max += 0.5
+    if y_min == y_max:
+        pad = max(1.0, abs(y_min) * 0.1)
+        y_min -= pad
+        y_max += pad
+
+    width = 980
+    height = 360
+    ml, mr, mt, mb = 64, 20, 20, 44
+    pw = max(1, width - ml - mr)
+    ph = max(1, height - mt - mb)
+
+    def sx(x: float) -> float:
+        return ml + (x - x_min) * pw / (x_max - x_min)
+
+    def sy(y: float) -> float:
+        return mt + (y_max - y) * ph / (y_max - y_min)
+
+    grid: List[str] = []
+    ticks = 5
+    for i in range(ticks + 1):
+        tx = ml + pw * i / ticks
+        ty = mt + ph * i / ticks
+        xv = x_min + (x_max - x_min) * i / ticks
+        yv = y_max - (y_max - y_min) * i / ticks
+        grid.append(f'<line x1="{tx:.2f}" y1="{mt}" x2="{tx:.2f}" y2="{mt + ph}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+        grid.append(f'<line x1="{ml}" y1="{ty:.2f}" x2="{ml + pw}" y2="{ty:.2f}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+        grid.append(f'<text x="{tx:.2f}" y="{height - 10}" fill="var(--muted)" font-size="11" text-anchor="middle">{_e(f"{xv:.4g}")}</text>')
+        grid.append(f'<text x="{ml - 8}" y="{ty + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(f"{yv:.4g}")}</text>')
+
+    def dots(points: List[Tuple[float, float, str]], color: str) -> str:
+        out: List[str] = []
+        for x, y, hover in points:
+            out.append(
+                f'<circle cx="{sx(x):.2f}" cy="{sy(y):.2f}" r="3.3" fill="{color}" fill-opacity="0.88">'
+                f'<title>{_e(hover)}</title></circle>'
+            )
+        return "".join(out)
+
+    axis = (
+        f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+        f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+    )
+
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="A/B scatter for {_e(csv_name)}">'
+        f'{"".join(grid)}'
+        f'{axis}'
+        f'{dots(a_pts, "var(--accent)")}'
+        f'{dots(b_pts, "var(--accent2)")}'
+        f'<text x="{ml + pw / 2:.2f}" y="{height - 24}" fill="var(--muted)" font-size="12" text-anchor="middle">{_e(x_col)}</text>'
+        f'<text x="16" y="{mt + ph / 2:.2f}" fill="var(--muted)" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + ph / 2:.2f})">{_e(y_col)}</text>'
+        '</svg>'
+    )
+
+    legend = (
+        f'<div class="sub">x-axis: <span class="mono">{_e(x_col)}</span> · y-axis: <span class="mono">{_e(y_col)}</span> '
+        f'· points A/B: <span class="mono">{len(a_pts)}</span>/<span class="mono">{len(b_pts)}</span></div>'
+        '<div class="sub"><span style="color: var(--accent)">●</span> A &nbsp; '
+        '<span style="color: var(--accent2)">●</span> B &nbsp; (hover points for details)</div>'
+    )
+
+    return f'<div class="plot"><div class="plot-title">TPS Scatter Compare</div>{legend}{svg}</div>'
+
+
+def _render_batch_token_tps_delta_heatmap(*, a_path: Path, b_path: Path) -> str:
+    if not a_path.exists() or not b_path.exists():
+        return '<div class="muted">Unavailable: this chart needs both A and B CSV files.</div>'
+
+    a_cols, a_rows = _read_csv_dict_rows(a_path)
+    b_cols, b_rows = _read_csv_dict_rows(b_path)
+    cols = [c for c in a_cols if c in set(b_cols)]
+    if not cols:
+        cols = list(dict.fromkeys(a_cols + b_cols))
+
+    need = {"batch_size", "token_len", "tps"}
+    if not need.issubset(set(cols)):
+        return '<div class="muted">Unavailable: requires columns <span class="mono">batch_size</span>, <span class="mono">token_len</span>, <span class="mono">tps</span>.</div>'
+
+    def _median(vals: List[float]) -> Optional[float]:
+        if not vals:
+            return None
+        s = sorted(vals)
+        n = len(s)
+        m = n // 2
+        if n % 2 == 1:
+            return s[m]
+        return (s[m - 1] + s[m]) / 2.0
+
+    def _agg(rows: List[Dict[str, str]]) -> Dict[Tuple[float, float], float]:
+        g: Dict[Tuple[float, float], List[float]] = {}
+        for r in rows:
+            bs = _try_float((r.get("batch_size", "") or "").strip())
+            tl = _try_float((r.get("token_len", "") or "").strip())
+            tps = _try_float((r.get("tps", "") or "").strip())
+            if bs is None or tl is None or tps is None:
+                continue
+            g.setdefault((float(bs), float(tl)), []).append(float(tps))
+        out: Dict[Tuple[float, float], float] = {}
+        for k, vals in g.items():
+            m = _median(vals)
+            if m is not None:
+                out[k] = m
+        return out
+
+    amap = _agg(a_rows)
+    bmap = _agg(b_rows)
+    keys = sorted(set(amap.keys()) | set(bmap.keys()), key=lambda k: (k[1], k[0]))
+    if not keys:
+        return '<div class="muted">Unavailable: no valid numeric (batch_size, token_len, tps) rows.</div>'
+
+    batch_vals = sorted(set(k[0] for k in keys))
+    token_vals = sorted(set(k[1] for k in keys))
+    if not batch_vals or not token_vals:
+        return '<div class="muted">Unavailable: empty batch/token grid.</div>'
+
+    deltas: Dict[Tuple[float, float], Optional[float]] = {}
+    max_abs = 0.0
+    for tl in token_vals:
+        for bs in batch_vals:
+            av = amap.get((bs, tl))
+            bv = bmap.get((bs, tl))
+            dv = _cmp_pct(av, bv)
+            deltas[(bs, tl)] = dv
+            if dv is not None and dv not in {float("inf"), float("-inf")}:
+                max_abs = max(max_abs, abs(float(dv)))
+    if max_abs <= 0:
+        max_abs = 1.0
+
+    cell_w = 92
+    cell_h = 42
+    ml, mt = 92, 36
+    width = ml + len(batch_vals) * cell_w + 20
+    height = mt + len(token_vals) * cell_h + 54
+
+    cells: List[str] = []
+    # Column labels (batch_size)
+    for i, bs in enumerate(batch_vals):
+        x = ml + i * cell_w
+        cells.append(f'<text x="{x + cell_w / 2:.2f}" y="20" fill="var(--muted)" font-size="11" text-anchor="middle">{_e(f"{bs:g}")}</text>')
+    # Row labels (token_len)
+    for j, tl in enumerate(token_vals):
+        y = mt + j * cell_h
+        cells.append(f'<text x="{ml - 10}" y="{y + cell_h / 2 + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(f"{tl:g}")}</text>')
+
+    for j, tl in enumerate(token_vals):
+        for i, bs in enumerate(batch_vals):
+            x = ml + i * cell_w
+            y = mt + j * cell_h
+            dv = deltas.get((bs, tl))
+            av = amap.get((bs, tl))
+            bv = bmap.get((bs, tl))
+
+            if dv is None:
+                fill = "transparent"
+                op = 1.0
+                txt = "-"
+            elif dv == float("inf"):
+                fill = "var(--accent2)"
+                op = 0.85
+                txt = "inf"
+            elif dv == float("-inf"):
+                fill = "var(--warn)"
+                op = 0.85
+                txt = "-inf"
+            else:
+                d = float(dv)
+                fill = "var(--accent2)" if d >= 0 else "var(--warn)"
+                op = min(0.88, 0.18 + 0.70 * abs(d) / max_abs)
+                txt = f"{d:+.1f}%"
+
+            title = f'batch_size={bs:g}, token_len={tl:g} | A={"-" if av is None else f"{av:.6g}"} B={"-" if bv is None else f"{bv:.6g}"} delta={txt}'
+            cells.append(
+                f'<rect x="{x + 1:.2f}" y="{y + 1:.2f}" width="{cell_w - 2:.2f}" height="{cell_h - 2:.2f}" '
+                f'stroke="var(--border)" stroke-width="1" fill="{fill}" fill-opacity="{op:.3f}">'
+                f'<title>{_e(title)}</title></rect>'
+            )
+            cells.append(
+                f'<text x="{x + cell_w / 2:.2f}" y="{y + cell_h / 2 + 4:.2f}" fill="var(--text)" font-size="11" text-anchor="middle">{_e(txt)}</text>'
+            )
+
+    svg = (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="TPS delta heatmap by batch_size and token_len">'
+        f'<text x="{ml + (len(batch_vals) * cell_w) / 2:.2f}" y="12" fill="var(--muted)" font-size="12" text-anchor="middle">batch_size</text>'
+        f'<text x="16" y="{mt + (len(token_vals) * cell_h) / 2:.2f}" fill="var(--muted)" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + (len(token_vals) * cell_h) / 2:.2f})">token_len</text>'
+        f'{"".join(cells)}'
+        '</svg>'
+    )
+
+    legend = (
+        '<div class="sub">Cell value = <span class="mono">(A/B - 1) * 100%</span> on TPS (median if duplicated rows).</div>'
+        '<div class="sub"><span style="color: var(--accent2)">■</span> A better than B &nbsp; '
+        '<span style="color: var(--warn)">■</span> A worse than B &nbsp; (color depth = |delta|)</div>'
+    )
+    return f'<div class="plot"><div class="plot-title">Batch×Token TPS Delta Heatmap</div>{legend}{svg}</div>'
+
+
 def _compare_csv_tables(
     *,
     a_path: Path,
@@ -1301,6 +1834,12 @@ def _compare_csv_tables(
     # Key columns should be stable across runs; drop volatile columns that contain
     # file paths / logs / artifacts (these differ even when the measurement point is the same).
     candidate_key_cols = [c for c in cols if c not in set(metrics)]
+
+    # Do not use CPU identity fields as join keys for compare-csv.
+    # These can differ between A/B runs even when the rest of the point is comparable,
+    # which causes row mismatch in the comparison output.
+    ab_only_cols = [c for c in ["resource_cpu", "resource_cpu_count", "cpu_count"] if c in cols]
+    candidate_key_cols = [c for c in candidate_key_cols if c not in set(ab_only_cols)]
 
     volatile_name_re = re.compile(
         r"(path|file|dir|folder|artifact|output|stdout|stderr|log|xlsx|html|json|csv)$",
@@ -1396,7 +1935,11 @@ def _compare_csv_tables(
         )
     else:
         metric_heads = "".join(f"<th class=\"mono\">{_e(c)}</th>" for c in metrics)
-    head = "<tr>" + "".join(f"<th>{_e(c)}</th>" for c in key_cols) + metric_heads + "</tr>"
+    ab_heads = "".join(
+        f"<th>{_e(c)}_A</th><th>{_e(c)}_B</th>"
+        for c in ab_only_cols
+    )
+    head = "<tr>" + "".join(f"<th>{_e(c)}</th>" for c in key_cols) + ab_heads + metric_heads + "</tr>"
 
     body_rows: List[str] = []
 
@@ -1430,6 +1973,9 @@ def _compare_csv_tables(
         for j, c in enumerate(key_cols):
             v = k[j] if j < len(k) else ""
             tds.append(f"<td>{_e(v)}</td>")
+        for c in ab_only_cols:
+            tds.append(f"<td>{_e((ar.get(c, '') or '').strip())}</td>")
+            tds.append(f"<td>{_e((br.get(c, '') or '').strip())}</td>")
         for c in metrics:
             a_raw = (ar.get(c, "") or "").strip()
             b_raw = (br.get(c, "") or "").strip()
@@ -1661,6 +2207,8 @@ def _render_compare_csv(scale_test_root: Path, runs: List[RunInfo], q: Dict[str,
 
     a_p = a_map.get(csv_name, Path("/dev/null"))
     b_p = b_map.get(csv_name, Path("/dev/null"))
+    scatter = _render_csv_tps_scatter_compare(a_path=a_p, b_path=b_p, csv_name=csv_name)
+    bt_heatmap = _render_batch_token_tps_delta_heatmap(a_path=a_p, b_path=b_p)
     table = _compare_csv_tables(a_path=a_p, b_path=b_p, max_out_rows=400, cell_view="abdelta")
 
     back_href = f"/compare?a={quote(a_raw)}&b={quote(b_raw)}"
@@ -1707,6 +2255,14 @@ def _render_compare_csv(scale_test_root: Path, runs: List[RunInfo], q: Dict[str,
         '<div class="sub">Metrics are expanded into <span class="mono">A_*</span>, <span class="mono">B_*</span>, and <span class="mono">delta_*%</span>. For <span class="mono">delta_*%</span>: when <span class="mono">A ≥ B</span> (and <span class="mono">B &gt; 0</span>) it shows the ratio <span class="mono">A/B</span> as <span class="mono">×</span> ("how many times"); when <span class="mono">A &lt; B</span> it shows the percent drop <span class="mono">(A/B - 1) * 100%</span>.</div>'
         '</section>'
         f'{cpu_info}'
+        '<section class="card">'
+        '<h2>Auto Compare Plot</h2>'
+        f'{scatter}'
+        '</section>'
+        '<section class="card">'
+        '<h2>Batch/Token Delta</h2>'
+        f'{bt_heatmap}'
+        '</section>'
         '<section class="card">'
         f'{table}'
         '</section>'
