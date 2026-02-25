@@ -3004,6 +3004,42 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
     # Preview
     preview_html = _render_csv_preview(csv_path, max_rows=preview_rows, run=run)
 
+    emon_compare_form = ""
+    if preview_only:
+        _, emon_rows = _load_emon_job_rows(run)
+        emon_opts: List[Tuple[str, str]] = []
+        seen_emon: set[str] = set()
+        for rr in emon_rows:
+            k = _emon_job_key(rr)
+            if not k or k in seen_emon:
+                continue
+            seen_emon.add(k)
+            jn = (rr.get("job_name") or "").strip()
+            sh = (rr.get("server_host") or "").strip()
+            lb = f"{jn} [{sh}]" if sh else jn
+            emon_opts.append((k, lb))
+
+        if emon_opts:
+            compare_base = f"/job-compare/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}"
+            opts_a = []
+            opts_b = []
+            for i, (k, lb) in enumerate(emon_opts):
+                sa = " selected" if i == 0 else ""
+                sb = " selected" if i == (1 if len(emon_opts) > 1 else 0) else ""
+                opts_a.append(f'<option value="{_e(k)}"{sa}>{_e(lb)}</option>')
+                opts_b.append(f'<option value="{_e(k)}"{sb}>{_e(lb)}</option>')
+            emon_compare_form = (
+                '<section class="card">'
+                '<h2>Compare Jobs</h2>'
+                '<div class="sub">Pick any two job names to compare EMon socket metrics.</div>'
+                f'<form method="get" action="{compare_base}" class="form-inline">'
+                f'<label>A <select name="a">{"".join(opts_a)}</select></label>'
+                f'<label>B <select name="b">{"".join(opts_b)}</select></label>'
+                '<button type="submit">Go Compare</button>'
+                '</form>'
+                '</section>'
+            )
+
     # Preview controls (no JS)
     self_href = f"/csv/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(csv_name)}"
     preview_controls = (
@@ -3076,6 +3112,7 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
     {preview_controls}
   {preview_html}
 </section>
+    {emon_compare_form}
 """
     else:
         body = f"""
@@ -3104,6 +3141,415 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
   {preview_html}
 </section>
 """
+    return _html_page(title, body)
+
+
+_EMON_METRICS: List[str] = [
+    "metric_CPU operating frequency (in GHz)",
+    "metric_uncore frequency GHz",
+    "metric_DDR data rate (MT/sec)",
+    "metric_UPI speed - GT/s",
+    "metric_CPU utilization %",
+    "metric_CPU utilization% in kernel mode",
+    "metric_CPI",
+    "metric_kernel_CPI",
+    "metric_core IPC",
+    "metric_package power (watts)",
+    "metric_L1D MPI (includes data+rfo w/ prefetches)",
+    "metric_L2 MPI (includes code+data+rfo w/ prefetches)",
+    "metric_LLC MPI (includes code+data+rfo w/ prefetches)",
+    "metric_NUMA %_Reads addressed to local DRAM",
+    "metric_NUMA %_Reads addressed to remote DRAM",
+    "metric_memory bandwidth read (MB/sec)",
+    "metric_memory bandwidth write (MB/sec)",
+    "metric_memory bandwidth total (MB/sec)",
+    "metric_core c6 residency %",
+    "metric_package c6 residency %",
+    "metric_package c2 residency %",
+    "metric_TMA_Frontend_Bound(%)",
+    "metric_TMA_Bad_Speculation(%)",
+    "metric_TMA_Retiring(%)",
+    "metric_TMA_Backend_Bound(%)",
+    "metric_TMA_..Memory_Bound(%)",
+    "metric_TMA_....L1_Bound(%)",
+    "metric_TMA_....L2_Bound(%)",
+    "metric_TMA_....L3_Bound(%)",
+    "metric_TMA_....DRAM_Bound(%)",
+    "metric_TMA_....Store_Bound(%)",
+    "metric_TMA_..Core_Bound(%)",
+]
+
+
+def _fmt_emon_metric(metric: str, v: str) -> str:
+    st = (v or "").strip()
+    if not st or st.lower() in {"nan", "none"}:
+        return ""
+    try:
+        x = float(st)
+    except Exception:
+        return _e(st)
+    m = metric.lower()
+    is_pct = "(%)" in metric or "utilization" in m or "residency" in m or "tma_" in m
+    if is_pct:
+        return _e(f"{x:.2f}")
+    if abs(x) >= 1000:
+        return _e(f"{x:.0f}")
+    if abs(x) >= 100:
+        return _e(f"{x:.2f}")
+    return _e(f"{x:.3f}")
+
+
+def _emon_sockets_of_row(row: Dict[str, str]) -> List[str]:
+    socket_keys = [k for k in row.keys() if k.startswith("socket_") and "__" in k]
+    return sorted({k.split("__", 1)[0] for k in socket_keys}, key=lambda s: (len(s), s))
+
+
+def _load_emon_job_rows(run: RunInfo) -> Tuple[List[str], List[Dict[str, str]]]:
+    csv_path = (run.analysis_dir / "emon_socket_metrics.csv").resolve()
+    if not _is_within(csv_path, run.analysis_dir) or not csv_path.exists():
+        return [], []
+    text = _read_text(csv_path, max_bytes=20_000_000)
+    reader = csv.DictReader(io.StringIO(text))
+    rows: List[Dict[str, str]] = []
+    fieldnames = list(reader.fieldnames or [])
+    for r in reader:
+        rows.append({k: ("" if v is None else str(v)) for k, v in r.items()})
+    return fieldnames, rows
+
+
+def _emon_job_key(row: Dict[str, str]) -> str:
+    job = (row.get("job_name") or "").strip()
+    host = (row.get("server_host") or "").strip()
+    return f"{host}::{job}" if host else job
+
+
+def _find_emon_job_row(rows: List[Dict[str, str]], pick: str) -> Optional[Dict[str, str]]:
+    want = (pick or "").strip()
+    if not want:
+        return None
+    for r in rows:
+        if _emon_job_key(r) == want:
+            return r
+    # Backward-compatible fallback: plain job_name
+    if "::" not in want:
+        for r in rows:
+            if (r.get("job_name") or "").strip() == want:
+                return r
+    return None
+
+
+def _render_emon_compare_metric_table(*, row_a: Dict[str, str], row_b: Dict[str, str], map_ab: List[Tuple[str, str]]) -> str:
+    heads = ["<th>metric</th>"]
+    for sa, sb in map_ab:
+        heads.append(f"<th>{_e(sa)} A</th><th>{_e(sb)} B</th><th>Δ%</th>")
+    trs: List[str] = []
+    for m in _EMON_METRICS:
+        tds = [f'<td class="mono">{_e(m)}</td>']
+        for sa, sb in map_ab:
+            ka = f"{sa}__{m}"
+            kb = f"{sb}__{m}"
+            va_raw = (row_a.get(ka, "") or "").strip()
+            vb_raw = (row_b.get(kb, "") or "").strip()
+            va = _try_float(va_raw)
+            vb = _try_float(vb_raw)
+            delta = _fmt_pct(_cmp_pct(va, vb))
+            title = f"A={va_raw}  B={vb_raw}"
+            tds.append(f'<td class="mono" title="{_e(title)}">{_fmt_emon_metric(m, va_raw)}</td>')
+            tds.append(f'<td class="mono" title="{_e(title)}">{_fmt_emon_metric(m, vb_raw)}</td>')
+            tds.append(f'<td class="mono" title="{_e(title)}">{_e(delta)}</td>')
+        trs.append("<tr>" + "".join(tds) + "</tr>")
+    return (
+        '<div class="table-scroll csv-compare-scroll">'
+        f'<table class="table small"><thead><tr>{"".join(heads)}</tr></thead><tbody>{"".join(trs)}</tbody></table>'
+        "</div>"
+    )
+
+
+def _build_emon_compare_export_xlsx(
+    *,
+    run: RunInfo,
+    row_a: Dict[str, str],
+    row_b: Dict[str, str],
+    map_ab: List[Tuple[str, str]],
+    a_pick: str,
+    b_pick: str,
+) -> bytes:
+    try:
+        from openpyxl import Workbook, load_workbook
+    except Exception as e:
+        raise RuntimeError(f"openpyxl is required for XLSX export: {e}")
+
+    wb = Workbook()
+    ws_info = wb.active
+    ws_info.title = "Info"
+
+    def _summary_path(row: Dict[str, str]) -> str:
+        s = (row.get("emon_summary_xlsx") or "").strip()
+        if not s:
+            return ""
+        try:
+            p = Path(s).resolve()
+            if _is_within(p, run.run_dir) and p.exists() and p.is_file():
+                return str(p)
+        except Exception:
+            pass
+        return s
+
+    a_job = (row_a.get("job_name") or "").strip()
+    b_job = (row_b.get("job_name") or "").strip()
+    a_host = (row_a.get("server_host") or "").strip()
+    b_host = (row_b.get("server_host") or "").strip()
+
+    ws_info.append(["field", "value"])
+    ws_info.append(["export_time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    ws_info.append(["run", f"{run.ref.task}/{run.ref.suite}/{run.ref.run_id}"])
+    ws_info.append(["A_pick", a_pick])
+    ws_info.append(["B_pick", b_pick])
+    ws_info.append(["A_job_name", a_job])
+    ws_info.append(["B_job_name", b_job])
+    ws_info.append(["A_server_host", a_host])
+    ws_info.append(["B_server_host", b_host])
+    ws_info.append(["A_summary_xlsx", _summary_path(row_a)])
+    ws_info.append(["B_summary_xlsx", _summary_path(row_b)])
+
+    ws_map = wb.create_sheet("SocketMapping")
+    ws_map.append(["A_socket", "B_socket"])
+    for sa, sb in map_ab:
+        ws_map.append([sa, sb])
+
+    def _canon_socket(name: str) -> str:
+        s = (name or "").strip().lower()
+        m = re.search(r"socket[\s_]*(\d+)", s)
+        if m:
+            try:
+                return f"socket_{int(m.group(1))}"
+            except Exception:
+                pass
+        return s.replace(" ", "_")
+
+    def _parse_summary_socket_view(xlsx_path: str) -> Tuple[List[str], Dict[str, Dict[str, Optional[float]]]]:
+        """Return (sockets, metric->socket->value) from summary.xlsx socket view."""
+        p = Path((xlsx_path or "").strip())
+        if not p.exists() or not p.is_file():
+            return [], {}
+        wb2 = load_workbook(p, data_only=True, read_only=True)
+        try:
+            if "socket view" not in wb2.sheetnames:
+                return [], {}
+            ws = wb2["socket view"]
+            it = ws.iter_rows(values_only=True)
+            try:
+                header = next(it)
+            except StopIteration:
+                return [], {}
+            header_vals = list(header or [])
+            sock_cols: List[Tuple[str, int]] = []
+            for idx, h in enumerate(header_vals[1:], start=2):
+                hs = "" if h is None else str(h).strip()
+                if not hs:
+                    continue
+                if "socket" in hs.lower():
+                    sock_cols.append((hs, idx))
+            sockets = [_canon_socket(h) for h, _ in sock_cols]
+            out: Dict[str, Dict[str, Optional[float]]] = {}
+            for rr in it:
+                cells = list(rr or [])
+                if not cells:
+                    continue
+                metric = "" if cells[0] is None else str(cells[0]).strip()
+                if not metric:
+                    continue
+                rowm: Dict[str, Optional[float]] = {}
+                for hs, idx in sock_cols:
+                    v = cells[idx - 1] if (idx - 1) < len(cells) else None
+                    fv = _try_float(v)
+                    rowm[_canon_socket(hs)] = fv
+                out[metric] = rowm
+            return sockets, out
+        finally:
+            wb2.close()
+
+    a_summary = _summary_path(row_a)
+    b_summary = _summary_path(row_b)
+    socks_a, metr_a = _parse_summary_socket_view(a_summary)
+    socks_b, metr_b = _parse_summary_socket_view(b_summary)
+
+    ws_sa = wb.create_sheet("SummarySocket_A")
+    ws_sa.append(["socket", "present"])
+    for s in socks_a:
+        ws_sa.append([s, 1])
+    ws_sb = wb.create_sheet("SummarySocket_B")
+    ws_sb.append(["socket", "present"])
+    for s in socks_b:
+        ws_sb.append([s, 1])
+
+    ws_cmp = wb.create_sheet("SummarySocketCompare")
+    head: List[str] = ["metric"]
+    for sa, sb in map_ab:
+        head.extend([f"A:{sa}", f"B:{sb}", f"delta%({sa}/{sb})"])
+    ws_cmp.append(head)
+
+    metric_names: List[str] = []
+    seen_metric: set[str] = set()
+    for m in list(metr_a.keys()) + list(metr_b.keys()):
+        if m in seen_metric:
+            continue
+        seen_metric.add(m)
+        metric_names.append(m)
+
+    if not metric_names:
+        ws_cmp.append(["(No socket view metrics found in summary.xlsx)"])
+    else:
+        for m in metric_names:
+            row: List[Any] = [m]
+            ma = metr_a.get(m, {})
+            mb = metr_b.get(m, {})
+            for sa, sb in map_ab:
+                ca = _canon_socket(sa)
+                cb = _canon_socket(sb)
+                va = ma.get(ca)
+                vb = mb.get(cb)
+                row.append(va)
+                row.append(vb)
+                row.append(_cmp_pct(va, vb))
+            ws_cmp.append(row)
+
+    from io import BytesIO
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _render_emon_job_compare(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) -> str:
+    required = [run.analysis_dir / "emon_socket_metrics.csv", run.analysis_dir / "emon_job_pies_manifest.json"]
+    _maybe_autogen_analysis(scale_test_root=scale_test_root, run=run, required=required)
+
+    _, rows = _load_emon_job_rows(run)
+    if not rows:
+        return _html_page("EMon compare", '<section class="card"><div class="warn">emon_socket_metrics.csv not found or empty.</div></section>')
+
+    # Unique options by host::job key.
+    opts: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for r in rows:
+        key = _emon_job_key(r)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        job = (r.get("job_name") or "").strip()
+        host = (r.get("server_host") or "").strip()
+        label = f"{job} [{host}]" if host else job
+        opts.append((key, label))
+
+    a_pick = (q.get("a") or [""])[0].strip()
+    b_pick = (q.get("b") or [""])[0].strip()
+    if not a_pick and opts:
+        a_pick = opts[0][0]
+    if not b_pick and len(opts) >= 2:
+        b_pick = opts[1][0]
+    elif not b_pick and opts:
+        b_pick = opts[0][0]
+
+    row_a = _find_emon_job_row(rows, a_pick)
+    row_b = _find_emon_job_row(rows, b_pick)
+
+    base = f"/job-compare/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}"
+
+    def sel(name: str, chosen: str) -> str:
+        options = []
+        for key, label in opts:
+            s = " selected" if key == chosen else ""
+            options.append(f'<option value="{_e(key)}"{s}>{_e(label)}</option>')
+        return f'<select name="{_e(name)}">{"".join(options)}</select>'
+
+    form = (
+        '<section class="card">'
+        '<h1>EMon Job Compare</h1>'
+        '<div class="sub">Choose any two jobs and map each A socket to a B socket.</div>'
+        f'<form method="get" action="{base}" class="form-inline">'
+        f'<label>A {sel("a", a_pick)}</label>'
+        f'<label>B {sel("b", b_pick)}</label>'
+        '<button type="submit">Compare</button>'
+        f'<a class="btn" href="{base}?a={quote(b_pick)}&b={quote(a_pick)}">Swap A/B</a>'
+        '</form>'
+        '</section>'
+    )
+
+    back_csv = f"/csv/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/emon_socket_metrics.csv"
+    if row_a is None or row_b is None:
+        body = (
+            form
+            + '<section class="card"><div class="warn">Please pick valid A/B jobs.</div>'
+            + f'<div><a class="btn" href="{back_csv}">Back to emon csv</a></div></section>'
+        )
+        return _html_page("EMon Job Compare", body)
+
+    socks_a = _emon_sockets_of_row(row_a)
+    socks_b = _emon_sockets_of_row(row_b)
+    if not socks_a or not socks_b:
+        body = (
+            form
+            + '<section class="card"><div class="warn">No socket metrics found in selected jobs.</div>'
+            + f'<div><a class="btn" href="{back_csv}">Back to emon csv</a></div></section>'
+        )
+        return _html_page("EMon Job Compare", body)
+
+    # Socket mapping form: m_<A socket>=<B socket>
+    map_pairs: List[Tuple[str, str]] = []
+    map_form_bits: List[str] = []
+    export_parts = [f"a={quote(a_pick)}", f"b={quote(b_pick)}"]
+    for i, sa in enumerate(socks_a):
+        default_sb = socks_b[i] if i < len(socks_b) else socks_b[0]
+        chosen_sb = (q.get(f"m_{sa}") or [default_sb])[0].strip() or default_sb
+        if chosen_sb not in socks_b:
+            chosen_sb = default_sb
+        map_pairs.append((sa, chosen_sb))
+        export_parts.append(f"m_{quote(sa)}={quote(chosen_sb)}")
+        ops = []
+        for sb in socks_b:
+            s = " selected" if sb == chosen_sb else ""
+            ops.append(f'<option value="{_e(sb)}"{s}>{_e(sb)}</option>')
+        map_form_bits.append(
+            f'<label><span class="mono">{_e(sa)}</span> → '
+            f'<select name="{_e("m_" + sa)}">{"".join(ops)}</select></label>'
+        )
+
+    export_href = f"/job-compare-export.xlsx/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}?{'&'.join(export_parts)}"
+
+    mapping_form = (
+        '<section class="card">'
+        '<h2>Socket Mapping</h2>'
+        f'<form method="get" action="{base}" class="form-inline">'
+        f'<input type="hidden" name="a" value="{_e(a_pick)}" />'
+        f'<input type="hidden" name="b" value="{_e(b_pick)}" />'
+        + "".join(map_form_bits)
+        + '<button type="submit">Apply Mapping</button>'
+        + f'<a class="btn" href="{export_href}">Download XLSX</a>'
+        + f'<a class="btn" href="{back_csv}">Back to emon csv</a>'
+        + '</form>'
+        '</section>'
+    )
+
+    table = _render_emon_compare_metric_table(row_a=row_a, row_b=row_b, map_ab=map_pairs)
+    a_job = (row_a.get("job_name") or "").strip()
+    a_host = (row_a.get("server_host") or "").strip()
+    b_job = (row_b.get("job_name") or "").strip()
+    b_host = (row_b.get("server_host") or "").strip()
+    body = (
+        form
+        + mapping_form
+        + '<section class="card">'
+        + '<h2>Compared Jobs</h2>'
+        + f'<div class="sub">A: <span class="mono">{_e(a_job)}</span>{(" • host: <span class=\"mono\">" + _e(a_host) + "</span>") if a_host else ""}</div>'
+        + f'<div class="sub">B: <span class="mono">{_e(b_job)}</span>{(" • host: <span class=\"mono\">" + _e(b_host) + "</span>") if b_host else ""}</div>'
+        + '</section>'
+        + '<section class="card"><h2>Socket Metrics Compare</h2>'
+        + '<div class="sub">Per-cell delta uses <span class="mono">(A/B - 1) * 100%</span>.</div>'
+        + table
+        + '</section>'
+    )
+    title = f"{run.ref.task} / {run.ref.suite} / {run.ref.run_id} :: emon compare"
     return _html_page(title, body)
 
 
@@ -3151,8 +3597,7 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
         return _html_page("Job not found", body_nf)
 
     # Sockets present.
-    socket_keys = [k for k in row.keys() if k.startswith("socket_") and "__" in k]
-    sockets = sorted({k.split("__", 1)[0] for k in socket_keys}, key=lambda s: (len(s), s))
+    sockets = _emon_sockets_of_row(row)
 
     # Load pie manifest.
     manifest: Dict[str, Any] = {}
@@ -3185,68 +3630,14 @@ def _render_job_detail(scale_test_root: Path, run: RunInfo, job_name: str, q: Di
         except Exception:
             pass
 
-    # Metric list (as requested).
-    metrics = [
-        "metric_CPU operating frequency (in GHz)",
-        "metric_uncore frequency GHz",
-        "metric_DDR data rate (MT/sec)",
-        "metric_UPI speed - GT/s",
-        "metric_CPU utilization %",
-        "metric_CPU utilization% in kernel mode",
-        "metric_CPI",
-        "metric_kernel_CPI",
-        "metric_core IPC",
-        "metric_package power (watts)",
-        "metric_L1D MPI (includes data+rfo w/ prefetches)",
-        "metric_L2 MPI (includes code+data+rfo w/ prefetches)",
-        "metric_LLC MPI (includes code+data+rfo w/ prefetches)",
-        "metric_NUMA %_Reads addressed to local DRAM",
-        "metric_NUMA %_Reads addressed to remote DRAM",
-        "metric_memory bandwidth read (MB/sec)",
-        "metric_memory bandwidth write (MB/sec)",
-        "metric_memory bandwidth total (MB/sec)",
-        "metric_core c6 residency %",
-        "metric_package c6 residency %",
-        "metric_package c2 residency %",
-        "metric_TMA_Frontend_Bound(%)",
-        "metric_TMA_Bad_Speculation(%)",
-        "metric_TMA_Retiring(%)",
-        "metric_TMA_Backend_Bound(%)",
-        "metric_TMA_..Memory_Bound(%)",
-        "metric_TMA_....L1_Bound(%)",
-        "metric_TMA_....L2_Bound(%)",
-        "metric_TMA_....L3_Bound(%)",
-        "metric_TMA_....DRAM_Bound(%)",
-        "metric_TMA_....Store_Bound(%)",
-        "metric_TMA_..Core_Bound(%)",
-    ]
-
-    def _fmt_metric(metric: str, v: str) -> str:
-        st = (v or "").strip()
-        if not st or st.lower() in {"nan", "none"}:
-            return ""
-        try:
-            x = float(st)
-        except Exception:
-            return _e(st)
-        m = metric.lower()
-        is_pct = "(%)" in metric or "utilization" in m or "residency" in m or "tma_" in m
-        if is_pct:
-            return _e(f"{x:.2f}")
-        if abs(x) >= 1000:
-            return _e(f"{x:.0f}")
-        if abs(x) >= 100:
-            return _e(f"{x:.2f}")
-        return _e(f"{x:.3f}")
-
     # Metric table.
     head = "<tr><th>metric</th>" + "".join(f"<th>{_e(s)}</th>" for s in sockets) + "</tr>"
     trs: List[str] = []
-    for m in metrics:
+    for m in _EMON_METRICS:
         tds = [f"<td class=\"mono\">{_e(m)}</td>"]
         for s in sockets:
             key = f"{s}__{m}"
-            tds.append(f"<td class=\"mono\">{_fmt_metric(m, row.get(key, ''))}</td>")
+            tds.append(f"<td class=\"mono\">{_fmt_emon_metric(m, row.get(key, ''))}</td>")
         trs.append("<tr>" + "".join(tds) + "</tr>")
     metric_table = (
         '<div class="table-scroll">'
@@ -3582,6 +3973,79 @@ class Handler(BaseHTTPRequestHandler):
                 return
             html_text = _render_job_detail(srv.scale_test_root, run, job_name, q, server_host=server_host)
             self._send(200, html_text, content_type="text/html; charset=utf-8")
+            return
+
+        if path.startswith("/job-compare/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) != 4:
+                self._send(404, "Not Found\n", content_type="text/plain")
+                return
+            _, task, suite, run_id = parts
+            run = srv.get_run(task, suite, run_id)
+            if run is None:
+                self._send(404, "Run not found\n", content_type="text/plain")
+                return
+            html_text = _render_emon_job_compare(srv.scale_test_root, run, q)
+            self._send(200, html_text, content_type="text/html; charset=utf-8")
+            return
+
+        if path.startswith("/job-compare-export.xlsx/"):
+            parts = [p for p in path.split("/") if p]
+            if len(parts) != 4:
+                self._send(404, "Not Found\n", content_type="text/plain")
+                return
+            _, task, suite, run_id = parts
+            run = srv.get_run(task, suite, run_id)
+            if run is None:
+                self._send(404, "Run not found\n", content_type="text/plain")
+                return
+
+            _, rows = _load_emon_job_rows(run)
+            a_pick = (q.get("a") or [""])[0].strip()
+            b_pick = (q.get("b") or [""])[0].strip()
+            row_a = _find_emon_job_row(rows, a_pick)
+            row_b = _find_emon_job_row(rows, b_pick)
+            if row_a is None or row_b is None:
+                self._send(400, "Invalid A/B job selection\n", content_type="text/plain")
+                return
+
+            socks_a = _emon_sockets_of_row(row_a)
+            socks_b = _emon_sockets_of_row(row_b)
+            if not socks_a or not socks_b:
+                self._send(400, "No socket metrics found\n", content_type="text/plain")
+                return
+
+            map_pairs: List[Tuple[str, str]] = []
+            for i, sa in enumerate(socks_a):
+                default_sb = socks_b[i] if i < len(socks_b) else socks_b[0]
+                chosen_sb = (q.get(f"m_{sa}") or [default_sb])[0].strip() or default_sb
+                if chosen_sb not in socks_b:
+                    chosen_sb = default_sb
+                map_pairs.append((sa, chosen_sb))
+
+            try:
+                payload = _build_emon_compare_export_xlsx(
+                    run=run,
+                    row_a=row_a,
+                    row_b=row_b,
+                    map_ab=map_pairs,
+                    a_pick=a_pick,
+                    b_pick=b_pick,
+                )
+            except Exception as e:
+                self._send(500, f"Export failed: {e}\n", content_type="text/plain")
+                return
+
+            dl = _sanitize_download_name(
+                f"emon_compare_{run.ref.task}_{run.ref.suite}_{run.ref.run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                default_ext=".xlsx",
+            )
+            self._send_bytes(
+                200,
+                payload,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                download_name=dl,
+            )
             return
 
         if path.startswith("/raw/"):
