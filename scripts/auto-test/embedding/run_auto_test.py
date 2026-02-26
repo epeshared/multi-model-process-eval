@@ -118,9 +118,98 @@ class Job:
     env: Dict[str, str]
     timeout_sec: Optional[float]
     warmup_runs: int
+    repeats: int
     restart_servers: bool
     stop_server_after_job: bool
     emon_enable: bool
+
+
+def _parse_int_ge(v: Any, *, default: int, min_value: int, field_name: str) -> int:
+    if v is None or str(v).strip() == "":
+        return int(default)
+    try:
+        iv = int(float(v))
+    except Exception:
+        raise SystemExit(f"{field_name} must be an integer >= {min_value}")
+    if iv < min_value:
+        raise SystemExit(f"{field_name} must be an integer >= {min_value}")
+    return int(iv)
+
+
+def _to_float_or_none(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return None
+        s = str(v).strip()
+        if s == "":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _mean_std(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
+    if not values:
+        return None, None
+    if len(values) == 1:
+        return float(values[0]), 0.0
+    mu = sum(values) / float(len(values))
+    var = sum((x - mu) ** 2 for x in values) / float(len(values))
+    return mu, var ** 0.5
+
+
+def _aggregate_repeat_metrics(
+    *,
+    script: str,
+    per_repeat: List[Dict[str, Any]],
+    include_failed: bool = False,
+) -> Dict[str, Any]:
+    """Aggregate parsed metrics across repeats.
+
+    - Uses only repeats with exit_code==0 by default.
+    - Returns a metrics dict compatible with existing CSV fields (tps/latency_sec/etc).
+    """
+
+    ok_recs: List[Dict[str, Any]] = []
+    for r in per_repeat:
+        if include_failed:
+            ok_recs.append(r)
+        else:
+            if int(r.get("exit_code") or 0) == 0:
+                ok_recs.append(r)
+
+    out: Dict[str, Any] = {
+        "repeats": int(len(per_repeat)),
+        "ok_repeats": int(len(ok_recs)),
+        "per_repeat": per_repeat,
+    }
+
+    if not ok_recs:
+        out["parse_error"] = "no_successful_repeats"
+        return out
+
+    # For embedding scripts, average key numeric metrics.
+    numeric_keys = ["tps", "latency_sec", "avg_batch_time_sec", "count", "num_batches"]
+    for k in numeric_keys:
+        vals: List[float] = []
+        for r in ok_recs:
+            v = _to_float_or_none((r.get("metrics") or {}).get(k))
+            if v is not None:
+                vals.append(float(v))
+        mean_v, std_v = _mean_std(vals)
+        if mean_v is not None:
+            out[k] = mean_v
+            out[f"{k}_std"] = std_v
+
+    # Keep one representative summary for debugging (use the last successful one).
+    last_metrics = ok_recs[-1].get("metrics") or {}
+    if isinstance(last_metrics, dict):
+        if "summary" in last_metrics:
+            out["summary"] = last_metrics.get("summary")
+
+    return out
 
 
 def _parse_bool(v: Any, *, default: bool = False) -> bool:
@@ -1548,6 +1637,8 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
     except Exception:
         raise SystemExit("defaults.warmup_runs must be an integer >= 0")
 
+    default_repeats = _parse_int_ge(defaults.get("repeats"), default=1, min_value=1, field_name="defaults.repeats")
+
     default_restart_servers = _parse_bool(defaults.get("restart_servers"), default=False)
     default_stop_server_after_job = _parse_bool(defaults.get("stop_server_after_job"), default=False)
     result_dir = Path(defaults.get("result_dir") or "scripts/auto-test/embedding/result")
@@ -1580,6 +1671,8 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
         except Exception:
             raise SystemExit(f"jobs[{name}].warmup_runs must be an integer >= 0")
 
+        repeats = _parse_int_ge(j.get("repeats", default_repeats), default=default_repeats, min_value=1, field_name=f"jobs[{name}].repeats")
+
         restart_servers = _parse_bool(j.get("restart_servers"), default=default_restart_servers)
         stop_server_after_job = _parse_bool(j.get("stop_server_after_job"), default=default_stop_server_after_job)
         emon_enable = _parse_bool(j.get("emon_enable"), default=False)
@@ -1592,6 +1685,7 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
                 env=env,
                 timeout_sec=job_timeout_sec,
                 warmup_runs=warmup_runs,
+                repeats=repeats,
                 restart_servers=restart_servers,
                 stop_server_after_job=stop_server_after_job,
                 emon_enable=emon_enable,
@@ -1665,6 +1759,7 @@ def main() -> int:
             "job_name",
             "script",
             "exit_code",
+            "repeats",
             "backend",
             "model",
             "model_id",
@@ -1673,8 +1768,11 @@ def main() -> int:
             "numactl_membind",
             "token_len",
             "tps",
+            "tps_std",
             "latency_sec",
+            "latency_sec_std",
             "avg_batch_time_sec",
+            "avg_batch_time_sec_std",
             "count",
             "num_batches",
             "started_at_utc",
@@ -1719,29 +1817,102 @@ def main() -> int:
                     pass
 
             log_path = Path(str(rec.get("log_path") or ""))
-            metrics: Dict[str, Any]
-            if script in ("run_embedding_yahoo", "run_fix_token_len"):
-                if log_path.exists():
-                    text = log_path.read_text(encoding="utf-8")
-                    metrics = _parse_embedding_metrics(text)
-                else:
-                    metrics = {"parse_error": f"missing_log:{log_path}"}
-            elif script == "run_mteb":
-                tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
-                if not tasks:
-                    # Fallback: try to infer from cmd[2] (bash script arg)
-                    cmd = rec.get("cmd") or []
-                    if isinstance(cmd, list) and len(cmd) >= 3:
-                        tasks = [str(cmd[2]).strip()]
-                output_folder = Path(str(env.get("OUTPUT_FOLDER") or "scripts/embedding/mteb"))
-                output_folder = (REPO_ROOT / output_folder).resolve() if not output_folder.is_absolute() else output_folder
-                metrics = _parse_mteb_metrics(output_folder=output_folder, tasks=tasks, model_id=model_id, backend=backend)
+            # If we have per-repeat logs recorded, re-aggregate metrics from those logs.
+            repeat_log_paths_raw = rec.get("repeat_log_paths")
+            repeat_log_paths: List[Path] = []
+            if isinstance(repeat_log_paths_raw, list):
+                for x in repeat_log_paths_raw:
+                    try:
+                        p = Path(str(x))
+                        repeat_log_paths.append(p)
+                    except Exception:
+                        continue
+
+            per_repeat: List[Dict[str, Any]] = []
+            if repeat_log_paths:
+                for i, lp in enumerate(repeat_log_paths, start=1):
+                    if not lp.exists():
+                        per_repeat.append(
+                            {
+                                "rep": int(i),
+                                "exit_code": int(1),
+                                "log_path": str(lp),
+                                "metrics": {"parse_error": f"missing_log:{lp}"},
+                            }
+                        )
+                        continue
+                    try:
+                        text_i = lp.read_text(encoding="utf-8")
+                    except Exception as e:
+                        per_repeat.append(
+                            {
+                                "rep": int(i),
+                                "exit_code": int(1),
+                                "log_path": str(lp),
+                                "metrics": {"parse_error": f"read_log_error:{e}"},
+                            }
+                        )
+                        continue
+
+                    # We don't have per-repeat exit codes in logs; assume OK if parsable.
+                    if script in ("run_embedding_yahoo", "run_fix_token_len"):
+                        metrics_i = _parse_embedding_metrics(text_i)
+                    elif script == "run_mteb":
+                        tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
+                        if not tasks:
+                            cmd = rec.get("cmd") or []
+                            if isinstance(cmd, list) and len(cmd) >= 3:
+                                tasks = [str(cmd[2]).strip()]
+                        output_folder = Path(str(env.get("OUTPUT_FOLDER") or "scripts/embedding/mteb"))
+                        output_folder = (
+                            (REPO_ROOT / output_folder).resolve() if not output_folder.is_absolute() else output_folder
+                        )
+                        metrics_i = _parse_mteb_metrics(
+                            output_folder=output_folder, tasks=tasks, model_id=model_id, backend=backend
+                        )
+                    else:
+                        metrics_i = {"parse_error": f"no_parser_for_script:{script}"}
+
+                    exit_code_i = 0 if not str(metrics_i.get("parse_error") or "").strip() else 1
+                    per_repeat.append(
+                        {
+                            "rep": int(i),
+                            "exit_code": int(exit_code_i),
+                            "log_path": str(lp),
+                            "metrics": metrics_i,
+                        }
+                    )
+
+                metrics = _aggregate_repeat_metrics(script=script, per_repeat=per_repeat)
             else:
-                metrics = {"parse_error": f"no_parser_for_script:{script}"}
+                metrics = {}
+                if script in ("run_embedding_yahoo", "run_fix_token_len"):
+                    if log_path.exists():
+                        text = log_path.read_text(encoding="utf-8")
+                        metrics = _parse_embedding_metrics(text)
+                    else:
+                        metrics = {"parse_error": f"missing_log:{log_path}"}
+                elif script == "run_mteb":
+                    tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
+                    if not tasks:
+                        cmd = rec.get("cmd") or []
+                        if isinstance(cmd, list) and len(cmd) >= 3:
+                            tasks = [str(cmd[2]).strip()]
+                    output_folder = Path(str(env.get("OUTPUT_FOLDER") or "scripts/embedding/mteb"))
+                    output_folder = (
+                        (REPO_ROOT / output_folder).resolve() if not output_folder.is_absolute() else output_folder
+                    )
+                    metrics = _parse_mteb_metrics(
+                        output_folder=output_folder, tasks=tasks, model_id=model_id, backend=backend
+                    )
+                else:
+                    metrics = {"parse_error": f"no_parser_for_script:{script}"}
 
             rec["metrics"] = metrics
             rec["tps"] = metrics.get("tps")
             rec["latency_sec"] = metrics.get("latency_sec")
+            rec["tps_std"] = metrics.get("tps_std")
+            rec["latency_sec_std"] = metrics.get("latency_sec_std")
             _write_json(mp, rec)
 
             recs.append(rec)
@@ -1750,6 +1921,7 @@ def main() -> int:
                     "job_name": rec.get("job_name"),
                     "script": script,
                     "exit_code": rec.get("exit_code"),
+                    "repeats": rec.get("repeats") or metrics.get("repeats") or "",
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,
@@ -1758,8 +1930,11 @@ def main() -> int:
                     "numactl_membind": numactl_membind,
                     "token_len": token_len,
                     "tps": rec.get("tps"),
+                    "tps_std": rec.get("tps_std") or metrics.get("tps_std") or "",
                     "latency_sec": rec.get("latency_sec"),
+                    "latency_sec_std": rec.get("latency_sec_std") or metrics.get("latency_sec_std") or "",
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
+                    "avg_batch_time_sec_std": metrics.get("avg_batch_time_sec_std"),
                     "count": metrics.get("count"),
                     "num_batches": metrics.get("num_batches"),
                     "started_at_utc": rec.get("started_at_utc"),
@@ -1803,6 +1978,7 @@ def main() -> int:
         "job_name",
         "script",
         "exit_code",
+        "repeats",
         "backend",
         "model",
         "model_id",
@@ -1811,8 +1987,11 @@ def main() -> int:
         "numactl_membind",
         "token_len",
         "tps",
+        "tps_std",
         "latency_sec",
+        "latency_sec_std",
         "avg_batch_time_sec",
+        "avg_batch_time_sec_std",
         "count",
         "num_batches",
         "started_at_utc",
@@ -1832,6 +2011,8 @@ def main() -> int:
             started_s = started.isoformat()
 
             safe = _sanitize_filename(job.name)
+            # Keep a stable "job log" path for backward compatibility, but store per-repeat
+            # logs separately (rep_XX). The job log will point to the last repeat.
             log_path = run_dir / f"{run_id}_{idx:03d}_{safe}.log"
             metrics_path = run_dir / f"{run_id}_{idx:03d}_{safe}.metrics.json"
 
@@ -1916,15 +2097,77 @@ def main() -> int:
                 )
 
             try:
-                exit_code, combined_output, wall_time_sec = _run_job_streaming(
-                    cmd=cmd_job,
-                    cwd=REPO_ROOT,
-                    env=env,
-                    log_path=log_path,
-                    tee=args.tee,
-                    prefix=f"[{job.name}] ",
-                    timeout_sec=job.timeout_sec,
-                )
+                per_repeat: List[Dict[str, Any]] = []
+                repeat_log_paths: List[str] = []
+                total_wall_time_sec = 0.0
+
+                first_nonzero_exit_code: Optional[int] = None
+                any_success = False
+                last_combined_output = ""
+
+                for rep in range(1, max(1, int(job.repeats)) + 1):
+                    rep_log_path = run_dir / f"{run_id}_{idx:03d}_{safe}.rep_{rep:02d}.log"
+                    repeat_log_paths.append(str(rep_log_path))
+
+                    rc_i, out_i, wall_i = _run_job_streaming(
+                        cmd=cmd_job,
+                        cwd=REPO_ROOT,
+                        env=env,
+                        log_path=rep_log_path,
+                        tee=args.tee,
+                        prefix=f"[{job.name} rep {rep}/{job.repeats}] ",
+                        timeout_sec=job.timeout_sec,
+                    )
+                    total_wall_time_sec += float(wall_i)
+                    last_combined_output = out_i
+                    if int(rc_i) == 0:
+                        any_success = True
+                    elif first_nonzero_exit_code is None:
+                        first_nonzero_exit_code = int(rc_i)
+
+                    # Parse per-repeat metrics (best-effort).
+                    if job.script in ("run_embedding_yahoo", "run_fix_token_len"):
+                        metrics_i = _parse_embedding_metrics(out_i)
+                    elif job.script == "run_mteb":
+                        tasks_i: List[str] = []
+                        if job.args:
+                            tasks_i = [str(job.args[0]).strip()]
+                        else:
+                            tasks_i = [t.strip() for t in (job.env.get("TASKS") or "").split(",") if t.strip()]
+                        output_folder_i = Path(job.env.get("OUTPUT_FOLDER") or "scripts/embedding/mteb")
+                        output_folder_i = (
+                            (REPO_ROOT / output_folder_i).resolve() if not output_folder_i.is_absolute() else output_folder_i
+                        )
+                        metrics_i = _parse_mteb_metrics(
+                            output_folder=output_folder_i,
+                            tasks=tasks_i,
+                            model_id=str(job.env.get("MODEL_ID") or ""),
+                            backend=backend,
+                        )
+                    else:
+                        metrics_i = {"parse_error": f"no_parser_for_script:{job.script}"}
+
+                    per_repeat.append(
+                        {
+                            "rep": int(rep),
+                            "exit_code": int(rc_i),
+                            "log_path": str(rep_log_path),
+                            "metrics": metrics_i,
+                        }
+                    )
+
+                # For compatibility: write the last repeat output to the legacy log_path.
+                # (So existing tooling that expects *.log can still find something.)
+                try:
+                    log_path.write_text(last_combined_output or "", encoding="utf-8")
+                except Exception:
+                    pass
+
+                # If at least one repeat succeeds, consider the overall job successful.
+                # This keeps scale-test analysis robust to occasional flaky failures.
+                exit_code = 0 if any_success else int(first_nonzero_exit_code or 1)
+                combined_output = str(last_combined_output)
+                wall_time_sec = float(total_wall_time_sec)
             finally:
                 if emon_session is not None:
                     _stop_emon_session(emon_session, tee=bool(args.tee), prefix=f"[{job.name}] ")
@@ -1944,6 +2187,8 @@ def main() -> int:
                 "wall_time_sec": wall_time_sec,
                 "env": {k: job.env.get(k) for k in sorted(job.env.keys())},
                 "log_path": str(log_path),
+                "repeats": int(job.repeats),
+                "repeat_log_paths": repeat_log_paths,
                 "server": server_info,
                 "job_numactl": {
                     "cores": job_numactl_cores,
@@ -1959,25 +2204,15 @@ def main() -> int:
             model = job.env.get("MODEL") or ""
             model_id = job.env.get("MODEL_ID") or ""
 
-            metrics: Dict[str, Any]
-            if job.script in ("run_embedding_yahoo", "run_fix_token_len"):
-                metrics = _parse_embedding_metrics(combined_output)
-            elif job.script == "run_mteb":
-                tasks: List[str] = []
-                if job.args:
-                    tasks = [str(job.args[0]).strip()]
-                else:
-                    tasks = [t.strip() for t in (job.env.get("TASKS") or "").split(",") if t.strip()]
-                output_folder = Path(job.env.get("OUTPUT_FOLDER") or "scripts/embedding/mteb")
-                output_folder = (REPO_ROOT / output_folder).resolve() if not output_folder.is_absolute() else output_folder
-                metrics = _parse_mteb_metrics(output_folder=output_folder, tasks=tasks, model_id=model_id, backend=backend)
-            else:
-                metrics = {"parse_error": f"no_parser_for_script:{job.script}"}
+            # Aggregate per-repeat metrics into a single metrics dict with mean/std.
+            metrics = _aggregate_repeat_metrics(script=job.script, per_repeat=per_repeat)
 
             merged = dict(base_rec)
             merged["metrics"] = metrics
             merged["tps"] = metrics.get("tps")
             merged["latency_sec"] = metrics.get("latency_sec")
+            merged["tps_std"] = metrics.get("tps_std")
+            merged["latency_sec_std"] = metrics.get("latency_sec_std")
             merged["backend"] = backend
             merged["model"] = model
             merged["model_id"] = model_id
@@ -1990,6 +2225,7 @@ def main() -> int:
                     "job_name": job.name,
                     "script": job.script,
                     "exit_code": exit_code,
+                    "repeats": int(job.repeats),
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,
@@ -1999,8 +2235,11 @@ def main() -> int:
                     "numactl_membind": server_info.get("numactl_membind"),
                     "token_len": _infer_token_len(script=job.script, env=job.env),
                     "tps": merged.get("tps"),
+                    "tps_std": merged.get("tps_std"),
                     "latency_sec": merged.get("latency_sec"),
+                    "latency_sec_std": merged.get("latency_sec_std"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
+                    "avg_batch_time_sec_std": metrics.get("avg_batch_time_sec_std"),
                     "count": metrics.get("count"),
                     "num_batches": metrics.get("num_batches"),
                     "started_at_utc": started_s,

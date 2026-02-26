@@ -284,7 +284,11 @@ else
   LEN_ARG=(--synthetic-input-len "${SYNTHETIC_INPUT_LEN}")
 fi
 
-python scripts/embedding/run_embedding.py \
+# Choose Python interpreter for the client benchmark.
+# Prefer a caller-provided interpreter so dependencies (e.g. torch) are consistent.
+EMBEDDING_PYTHON_BIN="${EMBEDDING_PYTHON:-${SGLANG_PYTHON:-python}}"
+
+"${EMBEDDING_PYTHON_BIN}" scripts/embedding/run_embedding.py \
   --model "${MODEL}" \
   "${MODEL_ID_ARG[@]}" \
   --backend "${BACKEND}" \

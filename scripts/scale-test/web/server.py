@@ -835,6 +835,358 @@ def _render_scaling_csv_ppt_summary(csv_path: Path) -> str:
     return f"<ul>{''.join(items2)}</ul>"
 
 
+def _render_emon_memory_bandwidth_key_plot(csv_path: Path) -> str:
+    """Render key plot for emon_socket_metrics.csv.
+
+    x-axis: batch_size
+    y-axis: sum over sockets of metric_memory bandwidth total (MB/sec)
+    facets: token_len
+    """
+    text = _read_text(csv_path, max_bytes=20_000_000)
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return '<div class="muted">Empty CSV.</div>'
+
+    cols = list(reader.fieldnames)
+    if "batch_size" not in cols:
+        return '<div class="muted">Missing required column: <span class="mono">batch_size</span>.</div>'
+
+    metric_suffix = "__metric_memory bandwidth total (MB/sec)"
+    sock_metric_cols = [c for c in cols if c.startswith("socket_") and c.endswith(metric_suffix)]
+    if not sock_metric_cols:
+        return '<div class="muted">No socket memory-bandwidth metric columns found.</div>'
+
+    token_col = "token_len" if "token_len" in cols else ""
+
+    def _norm(v: Any) -> str:
+        f = _try_float(v)
+        if f is None:
+            return str(v or "").strip()
+        if abs(f - int(f)) < 1e-9:
+            return str(int(f))
+        return f"{f:g}"
+
+    # (cpu, kv) -> token -> batch_size -> [sum_bandwidth]
+    grouped_grid: Dict[str, Dict[str, Dict[str, Dict[float, List[float]]]]] = {}
+    row_count = 0
+    for r in reader:
+        row_count += 1
+        bs = _try_float((r.get("batch_size", "") or "").strip())
+        if bs is None:
+            continue
+        tok = _norm(r.get(token_col, "")) if token_col else "all"
+        cpu_key = "-"
+        for ck in ["resource_cpu_count", "cpu_count", "resource_cpu"]:
+            if ck in cols:
+                vv = (r.get(ck, "") or "").strip()
+                if vv:
+                    cpu_key = _norm(vv)
+                    break
+        kv_key = "-"
+        for kk in ["kv_cap", "sglang_max_total_tokens"]:
+            if kk in cols:
+                vv = (r.get(kk, "") or "").strip()
+                if vv:
+                    kv_key = _norm(vv)
+                    break
+        vals: List[float] = []
+        for c in sock_metric_cols:
+            v = _try_float((r.get(c, "") or "").strip())
+            if v is not None:
+                vals.append(v)
+        if not vals:
+            continue
+        y = sum(vals)
+        grouped_grid.setdefault(cpu_key, {}).setdefault(kv_key, {}).setdefault(tok, {}).setdefault(float(bs), []).append(float(y))
+
+    if not grouped_grid:
+        return '<div class="muted">No valid rows for plotting batch_size vs memory bandwidth.</div>'
+
+    def _median(vals: List[float]) -> Optional[float]:
+        if not vals:
+            return None
+        s = sorted(vals)
+        n = len(s)
+        m = n // 2
+        if n % 2 == 1:
+            return s[m]
+        return (s[m - 1] + s[m]) / 2.0
+
+    def _tok_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    def _cpu_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    def _kv_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    # Prefer matplotlib rendering to match plot_batch_size_scaling.png exactly.
+    def _try_import_matplotlib_pyplot() -> Any:
+        try:
+            import matplotlib  # type: ignore
+
+            matplotlib.use("Agg", force=True)  # type: ignore[attr-defined]
+            import matplotlib.pyplot as plt  # type: ignore
+
+            return plt
+        except Exception:
+            return None
+
+    plt = _try_import_matplotlib_pyplot()
+    if plt is not None:
+        import base64
+        import io as _io
+        import math
+
+        def _fmt_point_value(v: Any) -> str:
+            try:
+                x = float(v)
+            except Exception:
+                return str(v)
+            if math.isnan(x) or math.isinf(x):
+                return ""
+            ax = abs(x)
+            if ax >= 1000:
+                return f"{x:.0f}"
+            if ax >= 100:
+                return f"{x:.1f}"
+            if ax >= 10:
+                return f"{x:.2f}"
+            return f"{x:.3f}"
+
+        cpu_vals = sorted(grouped_grid.keys(), key=_cpu_sort_key)
+        kv_vals = sorted({kv for cpu in grouped_grid.values() for kv in cpu.keys()}, key=_kv_sort_key)
+        if not cpu_vals:
+            cpu_vals = ["-"]
+        if not kv_vals:
+            kv_vals = ["-"]
+
+        nrows = max(1, len(cpu_vals))
+        ncols = max(1, len(kv_vals))
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.8 * nrows), squeeze=False)
+
+        cfg_charts = 0
+        for i, cpu in enumerate(cpu_vals):
+            for j, kv in enumerate(kv_vals):
+                ax = axes[i][j]
+                by_tok = grouped_grid.get(cpu, {}).get(kv, {})
+                if not by_tok:
+                    ax.set_axis_off()
+                    continue
+
+                cfg_charts += 1
+                for line_idx, tok in enumerate(sorted(by_tok.keys(), key=_tok_sort_key)[:8]):
+                    by_bs = by_tok.get(tok, {})
+                    pts: List[Tuple[float, float]] = []
+                    for bs in sorted(by_bs.keys()):
+                        med = _median(by_bs.get(bs, []))
+                        if med is None:
+                            continue
+                        pts.append((bs, med))
+                    if not pts:
+                        continue
+
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    ax.plot(xs, ys, marker="o", linewidth=1.8, label=f"token_len={tok}" if token_col else f"tok={tok}")
+
+                    # Match analyze_run.py annotation style.
+                    for px, py in zip(xs, ys):
+                        s = _fmt_point_value(py)
+                        if not s:
+                            continue
+                        ax.annotate(
+                            s,
+                            (px, py),
+                            textcoords="offset points",
+                            xytext=(0, 6 + 8 * (line_idx % 3)),
+                            ha="center",
+                            va="bottom",
+                            fontsize=7,
+                            alpha=0.9,
+                        )
+
+                ax.set_title(f"Batch scaling | cpu={cpu} | kv={kv}")
+                ax.set_xlabel("batch_size")
+                ax.set_ylabel("metric_memory bandwidth total (MB/sec)")
+                ax.grid(True, alpha=0.25)
+                ax.legend(fontsize=8)
+
+        fig.tight_layout()
+        buf = _io.BytesIO()
+        fig.savefig(buf, format="png", dpi=160)
+        plt.close(fig)
+        png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        png_uri = f"data:image/png;base64,{png_b64}"
+
+        # Match the web UI's plot card style used for plot_batch_size_scaling.png.
+        fname = "plot_batch_size_scaling.png"
+        img = f'<a href="{png_uri}" target="_blank"><img src="{png_uri}" alt="{_e(fname)}" /></a>'
+        card = (
+            '<div class="plots">'
+            '<div class="plot">'
+            f'<div class="plot-title">{_e(fname)}</div>'
+            f'{img}'
+            '</div>'
+            '</div>'
+        )
+        # Keep an explicit download link but align the filename.
+        dl = f'<div class="sub"><a href="{png_uri}" download="{_e(fname)}">Download</a></div>'
+        return f'<div>{dl}{card}</div>'
+
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+    def _render_series_svg(
+        *,
+        series: List[Tuple[str, List[Tuple[float, float, int]], str]],
+        title: str,
+        file_tag: str,
+    ) -> str:
+        # Use categorical x positions so each point maps exactly to its batch_size tick.
+        all_bs = sorted({p[0] for _, pts, _ in series for p in pts})
+        if not all_bs:
+            return '<div class="muted">No points.</div>'
+
+        x_idx = {x: i for i, x in enumerate(all_bs)}
+        all_y = [p[1] for _, pts, _ in series for p in pts]
+        y_min, y_max = min(all_y), max(all_y)
+        if y_min == y_max:
+            pad = max(1.0, abs(y_min) * 0.1)
+            y_min -= pad
+            y_max += pad
+
+        use_g = y_max >= 1000.0
+
+        def _fmt_bw(v: float) -> str:
+            if use_g:
+                return f"{(v / 1000.0):.2f}G"
+            return f"{v:.2f}"
+
+        width = 1100
+        height = 380
+        ml, mr, mt, mb = 70, 20, 20, 64
+        pw = max(1, width - ml - mr)
+        ph = max(1, height - mt - mb)
+        x_pad = min(48.0, pw * 0.08)
+
+        def sx(bs: float) -> float:
+            if len(all_bs) == 1:
+                return ml + pw / 2.0
+            idx = x_idx.get(bs, 0)
+            return ml + x_pad + idx * (pw - 2.0 * x_pad) / (len(all_bs) - 1)
+
+        def sy(y: float) -> float:
+            return mt + (y_max - y) * ph / (y_max - y_min)
+
+        grid: List[str] = []
+        # Horizontal grid
+        yticks = 5
+        for i in range(yticks + 1):
+            ty = mt + ph * i / yticks
+            yv = y_max - (y_max - y_min) * i / yticks
+            grid.append(f'<line x1="{ml}" y1="{ty:.2f}" x2="{ml + pw}" y2="{ty:.2f}" stroke="var(--border)" stroke-width="1" opacity="0.65" />')
+            grid.append(f'<text x="{ml - 8}" y="{ty + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(_fmt_bw(yv))}</text>')
+        # Vertical grid + exact batch_size ticks
+        for bs in all_bs:
+            tx = sx(bs)
+            grid.append(f'<line x1="{tx:.2f}" y1="{mt}" x2="{tx:.2f}" y2="{mt + ph}" stroke="var(--border)" stroke-width="1" opacity="0.45" />')
+            grid.append(f'<text x="{tx:.2f}" y="{height - 10}" fill="var(--muted)" font-size="11" text-anchor="middle">{_e(f"{bs:g}")}</text>')
+
+        axis = (
+            f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+            f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+        )
+
+        lines: List[str] = []
+        legends: List[str] = []
+        for idx, (name, pts, color) in enumerate(series):
+            sorted_pts = sorted(pts, key=lambda t: t[0])
+            poly = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for x, y, _ in sorted_pts)
+            lines.append(f'<polyline fill="none" stroke="{color}" stroke-width="2.2" points="{poly}" />')
+            for x, y, n in sorted_pts:
+                lines.append(
+                    f'<circle cx="{sx(x):.2f}" cy="{sy(y):.2f}" r="3.3" fill="{color}" fill-opacity="0.92">'
+                    f'<title>{name} | batch_size={x:.6g}, median bandwidth={y:.6g}, n={n}</title></circle>'
+                )
+                lines.append(
+                    f'<text x="{sx(x):.2f}" y="{sy(y) - 7:.2f}" fill="var(--text)" font-size="10" text-anchor="middle">{_e(_fmt_bw(y))}</text>'
+                )
+            lx = ml + 12 + (idx % 5) * 190
+            ly = mt + 14 + (idx // 5) * 14
+            legends.append(f'<text x="{lx:.2f}" y="{ly:.2f}" fill="{color}" font-size="11">● { _e(name) }</text>')
+
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="{_e(title)}">'
+            f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff" />'
+            f'{"".join(grid)}{axis}{"".join(lines)}{"".join(legends)}'
+            f'<text x="{ml + pw / 2:.2f}" y="{height - 30}" fill="#111111" font-size="12" text-anchor="middle">batch_size</text>'
+            f'<text x="16" y="{mt + ph / 2:.2f}" fill="#111111" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + ph / 2:.2f})">metric_memory bandwidth total ({"G" if use_g else "MB/sec"})</text>'
+            '</svg>'
+        )
+        svg_uri = "data:image/svg+xml;charset=utf-8," + quote(svg)
+        actions = (
+            '<div class="sub">'
+            f'<a href="{svg_uri}" target="_blank">放大查看</a> · '
+            f'<a href="{svg_uri}" download="{_e(file_tag)}.svg">下载SVG</a>'
+            '</div>'
+        )
+        return '<div class="plot">' + f'<div class="plot-title">{_e(title)}</div>' + actions + svg + '</div>'
+
+    cards: List[str] = []
+    cfg_count = 0
+    for cpu in sorted(grouped_grid.keys(), key=_cpu_sort_key):
+        by_kv = grouped_grid.get(cpu, {})
+        for kv in sorted(by_kv.keys(), key=_kv_sort_key):
+            cfg = f"cpu={cpu} | kv={kv}"
+            by_tok = by_kv.get(kv, {})
+        facets: List[Tuple[str, List[Tuple[float, float, int]]]] = []
+        for tok, by_bs in by_tok.items():
+            pts: List[Tuple[float, float, int]] = []
+            for bs in sorted(by_bs.keys()):
+                med = _median(by_bs.get(bs, []))
+                if med is None:
+                    continue
+                pts.append((bs, med, len(by_bs.get(bs, []))))
+            if pts:
+                facets.append((tok, pts))
+        if not facets:
+            continue
+        facets = sorted(facets, key=lambda t: _tok_sort_key(t[0]))[:8]
+        combined_series: List[Tuple[str, List[Tuple[float, float, int]], str]] = []
+        for i, (tok, pts) in enumerate(facets):
+            combined_series.append((f"token_len={tok}" if token_col else "all", pts, palette[i % len(palette)]))
+        cards.append(
+            _render_series_svg(
+                series=combined_series,
+                title=f"EMon Batch Size Scaling (Memory Bandwidth) · {cfg}",
+                file_tag=f"emon_plot_batch_size_scaling_memory_bw_{cfg.replace(' ', '_').replace('|', '_').replace('=', '_')}",
+            )
+        )
+        cfg_count += 1
+
+    if not cards:
+        return '<div class="muted">No plottable points found.</div>'
+
+    legend = (
+        '<div class="sub">Key plot: x=<span class="mono">batch_size</span>, '
+        'y=<span class="mono">Σ socket_i__metric_memory bandwidth total (MB/sec)</span> (median by x).</div>'
+        '<div class="sub">风格对齐 batch_size_scaling：白色背景、单图多 token_len 曲线，并按 CPU/KV 分组出图。</div>'
+        '<div class="sub">提示：此处为 SVG 回退渲染（当运行环境缺少 matplotlib 时启用），风格可能与 plot_batch_size_scaling.png 存在细微差异。</div>'
+        f'<div class="sub">rows={_e(row_count)} · sockets={_e(len(sock_metric_cols))} · cfg_charts={_e(cfg_count)}</div>'
+    )
+    return f'<div>{legend}<div class="plots">{"".join(cards)}</div></div>'
+
+
 def _parse_cpu_expr(cpu_expr: str) -> Optional[int]:
     """Best-effort parse of CPU expr like '0-15' or '0,2,4' into count."""
     s = str(cpu_expr).strip()
@@ -3003,6 +3355,7 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
 
     # Preview
     preview_html = _render_csv_preview(csv_path, max_rows=preview_rows, run=run)
+    emon_key_plot_html = _render_emon_memory_bandwidth_key_plot(csv_path) if preview_only else ""
 
     emon_compare_form = ""
     if preview_only:
@@ -3104,7 +3457,12 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
   </div>
   <h1>CSV</h1>
   <div class="sub">file: <span class="mono">{_e(csv_name)}</span> • <a href="{raw}" target="_blank">Download</a></div>
-  <div class="sub">This page intentionally shows preview only (no summary/plots) to keep the job navigation clean.</div>
+    <div class="sub">This page shows preview + key plot for quick EMon triage.</div>
+</section>
+
+<section class="card">
+    <h2>关键图</h2>
+    {emon_key_plot_html}
 </section>
 
 <section class="card">

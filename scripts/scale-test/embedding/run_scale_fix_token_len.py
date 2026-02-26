@@ -5,6 +5,7 @@ import argparse
 import csv
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 import socket
@@ -20,6 +21,117 @@ from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+_LOCAL_ADDR_CACHE: Optional[set[str]] = None
+
+
+def _local_addrs() -> set[str]:
+    """Best-effort set of IP strings that should be treated as local."""
+
+    global _LOCAL_ADDR_CACHE
+    if _LOCAL_ADDR_CACHE is not None:
+        return set(_LOCAL_ADDR_CACHE)
+
+    addrs: set[str] = set()
+    # Canonical loopback aliases.
+    addrs.update({"127.0.0.1", "::1"})
+
+    def _add_from_getaddrinfo(name: str) -> None:
+        try:
+            for fam, _, _, _, sockaddr in socket.getaddrinfo(name, None):
+                if fam == socket.AF_INET:
+                    addrs.add(str(sockaddr[0]))
+                elif fam == socket.AF_INET6:
+                    addrs.add(str(sockaddr[0]))
+        except Exception:
+            return
+
+    # Hostname/fqdn/localhost often cover the common on-box addresses.
+    _add_from_getaddrinfo("localhost")
+    try:
+        _add_from_getaddrinfo(socket.gethostname())
+    except Exception:
+        pass
+    try:
+        _add_from_getaddrinfo(socket.getfqdn())
+    except Exception:
+        pass
+
+    # Best-effort: hostname -I (Linux) provides all interface addresses.
+    try:
+        p = subprocess.run(["hostname", "-I"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        if p.returncode == 0 and p.stdout:
+            for tok in (p.stdout or "").split():
+                t = tok.strip()
+                if t:
+                    addrs.add(t)
+    except Exception:
+        pass
+
+    _LOCAL_ADDR_CACHE = set(addrs)
+    return set(addrs)
+
+
+def _is_local_host(host: str) -> bool:
+    """Return True if host refers to the current machine."""
+
+    h = str(host or "").strip()
+    if not h:
+        return False
+    if h.lower() in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    if h in {"127.0.0.1", "::1", "0.0.0.0", "::"}:
+        return True
+
+    # Direct IP literal.
+    try:
+        ip = ipaddress.ip_address(h)
+        if ip.is_loopback or ip.is_unspecified:
+            return True
+        return h in _local_addrs()
+    except Exception:
+        pass
+
+    # Resolve hostname -> IPs and compare.
+    try:
+        local = _local_addrs()
+        for fam, _, _, _, sockaddr in socket.getaddrinfo(h, None):
+            if fam == socket.AF_INET:
+                if str(sockaddr[0]) in local:
+                    return True
+            elif fam == socket.AF_INET6:
+                if str(sockaddr[0]) in local:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _sync_tree(src_dir: Path, dst_dir: Path) -> None:
+    """Rsync-like copy from src_dir into dst_dir (overwrite files, create dirs)."""
+
+    src = Path(src_dir)
+    dst = Path(dst_dir)
+    if not src.exists() or not src.is_dir():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for root, dirs, files in os.walk(str(src)):
+        root_p = Path(root)
+        rel = root_p.relative_to(src)
+        out_root = dst / rel
+        out_root.mkdir(parents=True, exist_ok=True)
+        for d in dirs:
+            (out_root / d).mkdir(parents=True, exist_ok=True)
+        for fn in files:
+            s = root_p / fn
+            t = out_root / fn
+            try:
+                t.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(s), str(t))
+            except Exception:
+                # Best-effort: ignore individual copy failures.
+                pass
 
 
 def _utc_compact() -> str:
@@ -577,6 +689,7 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
                 host = str(item.get("ip") or item.get("host") or "").strip()
                 if not host:
                     continue
+                is_local = _is_local_host(host)
                 user = str(item.get("username") or item.get("user") or ssh_user_default or "").strip()
                 raw_password = item.get("password", _PASSWORD_MISSING)
                 if raw_password is None and "password" in item:
@@ -584,7 +697,7 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
                     # When running locally (e.g. on remote workers with --no-ssh-dispatch),
                     # configs may still contain password=null for dispatch, but the
                     # password file is intentionally not present.
-                    if resolve_ssh_passwords:
+                    if resolve_ssh_passwords and (not is_local):
                         password = _password_from_file(host, user, item.get("password_file"))
                     else:
                         password = ""
@@ -1207,6 +1320,10 @@ def _dispatch_multi_host(
     if not servers:
         raise SystemExit("config.run.servers is empty")
 
+    # Local hosts (127.0.0.1 / localhost / on-box IPs) can run without SSH/rsync/scp.
+    remote_servers = [s for s in servers if not _is_local_host(str(getattr(s, "host", "")))]
+    has_remote = bool(remote_servers)
+
     out_dir = (result_root / scale_id).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     hosts_dir = out_dir / "hosts"
@@ -1221,10 +1338,11 @@ def _dispatch_multi_host(
     rsync_bin = _which("rsync")
     scp_bin = _which("scp")
     sshpass_bin = _which("sshpass")
-    if not scp_bin and not dry_run:
-        raise SystemExit("scp is required for multi-host dispatch")
-    if not rsync_bin and not dry_run:
-        raise SystemExit("rsync is required for multi-host dispatch (install rsync)")
+    if has_remote:
+        if not scp_bin and not dry_run:
+            raise SystemExit("scp is required for multi-host dispatch")
+        if not rsync_bin and not dry_run:
+            raise SystemExit("rsync is required for multi-host dispatch (install rsync)")
 
     all_rows: List[Dict[str, Any]] = []
     dispatch_env = _dispatch_subprocess_env()
@@ -1259,6 +1377,7 @@ def _dispatch_multi_host(
 
     for server in servers:
         host = str(server.host)
+        is_local = _is_local_host(host)
         target = _ssh_host_target(server.host, server.user)
         host_tag = _safe_name(host.replace(":", "_"))
         local_host_dir = (hosts_dir / host_tag).resolve()
@@ -1267,7 +1386,7 @@ def _dispatch_multi_host(
         ssh_args = _ssh_base_args(server)
         scp_args = _scp_base_args(server)
         prefix = _maybe_sshpass_prefix(server)
-        if server.password and not sshpass_bin and not dry_run:
+        if (not is_local) and server.password and not sshpass_bin and not dry_run:
             raise SystemExit("sshpass is required when config.run.servers[*].password is set (install sshpass or use SSH keys)")
 
         # Pre-flight connectivity check for clearer errors in restricted networks.
@@ -1282,7 +1401,7 @@ def _dispatch_multi_host(
                 uses_proxy = True
                 break
 
-        if not uses_proxy:
+        if (not is_local) and (not uses_proxy):
             connect_port = int(server.port or 22)
             try:
                 sock = socket.create_connection((host, connect_port), timeout=6.0)
@@ -1304,6 +1423,10 @@ def _dispatch_multi_host(
         remote_cfg_path = f"{remote_cfg_dir}/{cfg_path.name}"
         remote_repo_dir = server.remote_repo_dir
         remote_result_root = server.remote_result_root or str(result_root)
+        if is_local:
+            # Avoid pathological cases where the run directory contains the host dir (recursion).
+            # Also keep local execution isolated per-host.
+            remote_result_root = str((result_root / "_local_remote_result_root" / host_tag).resolve())
         remote_run_dir = f"{remote_result_root.rstrip('/')}/{scale_id}"
 
         # Resume shortcut: if we already have a successful local copy for this host,
@@ -1628,7 +1751,7 @@ def _dispatch_multi_host(
             + "exit $RC"
         ).strip()
 
-        print(f"[info] dispatch host={host}")
+        print(f"[info] dispatch host={host}{' (local)' if is_local else ''}")
         print(f"[info] remote_repo_dir={remote_repo_dir}")
         print(f"[info] remote_run_dir={remote_run_dir}")
 
@@ -1640,10 +1763,78 @@ def _dispatch_multi_host(
 
         if dry_run:
             # Avoid printing secrets. (sshpass is only used when password is provided.)
-            if server.password:
+            if (not is_local) and server.password:
                 print(f"[dry-run] ssh (password auth) {target} bash -lc <remote_cmd>")
             else:
-                print(f"[dry-run] ssh {target} bash -lc {remote_cmd}")
+                if is_local:
+                    print(f"[dry-run] local bash -lc <remote_cmd> (host={host})")
+                else:
+                    print(f"[dry-run] ssh {target} bash -lc {remote_cmd}")
+            continue
+
+        # Local fast-path: no SSH/scp/rsync; execute the same dispatch script locally.
+        if is_local:
+            # Ensure the repo dir exists locally; do not copy the repo.
+            repo_dir_p = Path(str(remote_repo_dir)).expanduser()
+            if not repo_dir_p.is_absolute():
+                repo_dir_p = (REPO_ROOT / repo_dir_p).resolve()
+            else:
+                repo_dir_p = repo_dir_p.resolve()
+            if not repo_dir_p.exists():
+                raise SystemExit(
+                    f"local dispatch requires remote_repo_dir to exist on this machine (host={host}): {repo_dir_p}. "
+                    f"Tip: set remote_repo_dir={REPO_ROOT} for local runs."
+                )
+
+            # Prepare local dispatch cfg dir and copy config + pre-req scripts.
+            local_cfg_dir = Path(remote_cfg_dir)
+            local_cfg_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(str(cfg_path), str(local_cfg_dir / cfg_path.name))
+            except Exception as e:
+                raise SystemExit(f"failed to stage config into {local_cfg_dir}: {e}")
+            for _, local_p, remote_p in pre_req_items:
+                try:
+                    Path(remote_p).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(local_p), str(remote_p))
+                except Exception:
+                    pass
+
+            # Run the dispatch command locally (same bash logic as remote).
+            remote_run_log = local_host_dir / "remote_run.log"
+            rc_local = _run_stream_to_log(["bash", "-lc", remote_cmd], log_path=remote_run_log, echo=bool(tee))
+            if rc_local != 0:
+                print(f"[error] local run failed (host={host}, rc={rc_local}). See {remote_run_log}")
+                if not scale.continue_on_error:
+                    return int(rc_local)
+
+            # Capture server info locally (best-effort).
+            try:
+                info_dir = local_host_dir / "server_info"
+                info_dir.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["lscpu"], stdout=(info_dir / "lscpu.txt").open("w", encoding="utf-8"), stderr=subprocess.STDOUT, text=True, check=False)
+                subprocess.run(["bash", "-lc", "lscpu -J"], stdout=(info_dir / "lscpu.json").open("w", encoding="utf-8"), stderr=subprocess.STDOUT, text=True, check=False)
+                subprocess.run(["bash", "-lc", "cat /proc/meminfo"], stdout=(info_dir / "meminfo.txt").open("w", encoding="utf-8"), stderr=subprocess.STDOUT, text=True, check=False)
+            except Exception:
+                pass
+
+            # Copy back the run dir into local_host_dir (rsync-back equivalent).
+            _sync_tree(Path(remote_run_dir), local_host_dir)
+
+            # Load host aggregate and rewrite paths to local copies.
+            host_agg = local_host_dir / "aggregate.csv"
+            host_rows = _read_csv_rows(host_agg)
+            for r in host_rows:
+                r2: Dict[str, Any] = dict(r)
+                r2["server_host"] = host
+                for k in ["log_path", "metrics_path", "emon_output_path", "emon_summary_xlsx", "emon_process_log"]:
+                    if k in r2:
+                        r2[k] = _rewrite_remote_path_to_local(
+                            val=str(r2.get(k, "")),
+                            remote_run_dir=remote_run_dir,
+                            local_host_dir=local_host_dir,
+                        )
+                all_rows.append(r2)
             continue
 
         if not _maybe_preflight_socks_proxy(server=server, local_host_dir=local_host_dir, dispatch_env=dispatch_env):
@@ -2045,12 +2236,12 @@ def _generate_auto_test_config(
         pass
 
     jobs: List[Dict[str, Any]] = []
-    for rep in range(1, max(1, int(scale.repeats)) + 1):
-        for bs in scale.batch_sizes:
-            for tl in scale.token_lens:
-                name = f"scale_fix_token_len_tok{int(tl)}_bs{int(bs)}_{model}_{backend}_rep{rep}"
-                if (variant_tag or "").strip():
-                    name = f"{name}__{_safe_name(variant_tag)}"
+    repeats = max(1, int(scale.repeats))
+    for bs in scale.batch_sizes:
+        for tl in scale.token_lens:
+            name = f"scale_fix_token_len_tok{int(tl)}_bs{int(bs)}_{model}_{backend}"
+            if (variant_tag or "").strip():
+                name = f"{name}__{_safe_name(variant_tag)}"
                 env = {
                     "MODEL": model,
                     "BACKEND": backend,
@@ -2123,6 +2314,7 @@ def _generate_auto_test_config(
                         "script": "run_fix_token_len",
                         "args": {},
                         "warmup_runs": int(scale.warmup_runs),
+                        "repeats": int(repeats),
                         "restart_servers": restart_servers,
                         "stop_server_after_job": stop_server_after_job,
                         "emon_enable": emon_enable,
