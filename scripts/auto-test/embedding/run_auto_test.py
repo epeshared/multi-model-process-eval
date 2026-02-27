@@ -119,6 +119,8 @@ class Job:
     timeout_sec: Optional[float]
     warmup_runs: int
     repeats: int
+    repeat_threshold_sec: Optional[float]
+    repeat_max_repeats: int
     restart_servers: bool
     stop_server_after_job: bool
     emon_enable: bool
@@ -1638,6 +1640,18 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
         raise SystemExit("defaults.warmup_runs must be an integer >= 0")
 
     default_repeats = _parse_int_ge(defaults.get("repeats"), default=1, min_value=1, field_name="defaults.repeats")
+    default_repeat_threshold_sec: Optional[float] = None
+    rts = defaults.get("repeat_threshold_sec")
+    if rts is not None and str(rts).strip() != "":
+        try:
+            v = float(rts)
+            if v > 0:
+                default_repeat_threshold_sec = float(v)
+        except Exception:
+            raise SystemExit("defaults.repeat_threshold_sec must be a number > 0")
+    default_repeat_max_repeats = _parse_int_ge(
+        defaults.get("repeat_max_repeats"), default=100, min_value=1, field_name="defaults.repeat_max_repeats"
+    )
 
     default_restart_servers = _parse_bool(defaults.get("restart_servers"), default=False)
     default_stop_server_after_job = _parse_bool(defaults.get("stop_server_after_job"), default=False)
@@ -1673,6 +1687,25 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
 
         repeats = _parse_int_ge(j.get("repeats", default_repeats), default=default_repeats, min_value=1, field_name=f"jobs[{name}].repeats")
 
+        repeat_threshold_sec: Optional[float] = default_repeat_threshold_sec
+        rts_j = j.get("repeat_threshold_sec")
+        if rts_j is not None and str(rts_j).strip() != "":
+            try:
+                v = float(rts_j)
+            except Exception:
+                raise SystemExit(f"jobs[{name}].repeat_threshold_sec must be a number > 0")
+            if v > 0:
+                repeat_threshold_sec = float(v)
+            else:
+                repeat_threshold_sec = None
+
+        repeat_max_repeats = _parse_int_ge(
+            j.get("repeat_max_repeats", default_repeat_max_repeats),
+            default=default_repeat_max_repeats,
+            min_value=1,
+            field_name=f"jobs[{name}].repeat_max_repeats",
+        )
+
         restart_servers = _parse_bool(j.get("restart_servers"), default=default_restart_servers)
         stop_server_after_job = _parse_bool(j.get("stop_server_after_job"), default=default_stop_server_after_job)
         emon_enable = _parse_bool(j.get("emon_enable"), default=False)
@@ -1686,6 +1719,8 @@ def _build_jobs(cfg: Dict[str, Any]) -> Tuple[Path, Dict[str, str], List[Job]]:
                 timeout_sec=job_timeout_sec,
                 warmup_runs=warmup_runs,
                 repeats=repeats,
+                repeat_threshold_sec=repeat_threshold_sec,
+                repeat_max_repeats=repeat_max_repeats,
                 restart_servers=restart_servers,
                 stop_server_after_job=stop_server_after_job,
                 emon_enable=emon_enable,
@@ -2101,11 +2136,18 @@ def main() -> int:
                 repeat_log_paths: List[str] = []
                 total_wall_time_sec = 0.0
 
+                repeats_config = max(1, int(job.repeats))
+                repeats_effective = repeats_config
+                repeats_computed: Optional[int] = None
+                repeats_capped = False
+
                 first_nonzero_exit_code: Optional[int] = None
                 any_success = False
                 last_combined_output = ""
 
-                for rep in range(1, max(1, int(job.repeats)) + 1):
+                def _run_one_repeat(rep: int, *, rep_total_hint: str) -> None:
+                    nonlocal total_wall_time_sec, last_combined_output, any_success, first_nonzero_exit_code
+
                     rep_log_path = run_dir / f"{run_id}_{idx:03d}_{safe}.rep_{rep:02d}.log"
                     repeat_log_paths.append(str(rep_log_path))
 
@@ -2115,7 +2157,7 @@ def main() -> int:
                         env=env,
                         log_path=rep_log_path,
                         tee=args.tee,
-                        prefix=f"[{job.name} rep {rep}/{job.repeats}] ",
+                        prefix=f"[{job.name} rep {rep}/{rep_total_hint}] ",
                         timeout_sec=job.timeout_sec,
                     )
                     total_wall_time_sec += float(wall_i)
@@ -2152,9 +2194,37 @@ def main() -> int:
                             "rep": int(rep),
                             "exit_code": int(rc_i),
                             "log_path": str(rep_log_path),
+                            "wall_time_sec": float(wall_i),
                             "metrics": metrics_i,
                         }
                     )
+
+                # Threshold mode: always run first repeat, then decide how many total repeats.
+                if job.repeat_threshold_sec is not None and float(job.repeat_threshold_sec) > 0:
+                    _run_one_repeat(1, rep_total_hint="auto")
+
+                    wall1 = None
+                    if per_repeat:
+                        wall1 = _to_float_or_none(per_repeat[0].get("wall_time_sec"))
+
+                    thr = float(job.repeat_threshold_sec)
+                    if wall1 is not None and wall1 > 0 and wall1 < thr:
+                        repeats_computed = max(1, int(thr / wall1))
+                    else:
+                        repeats_computed = 1
+
+                    repeats_effective = max(1, int(repeats_computed))
+                    if repeats_effective > int(job.repeat_max_repeats):
+                        repeats_effective = int(job.repeat_max_repeats)
+                        repeats_capped = True
+
+                    # Run remaining repeats.
+                    for rep in range(2, repeats_effective + 1):
+                        _run_one_repeat(rep, rep_total_hint=str(repeats_effective))
+                else:
+                    repeats_effective = repeats_config
+                    for rep in range(1, repeats_effective + 1):
+                        _run_one_repeat(rep, rep_total_hint=str(repeats_effective))
 
                 # For compatibility: write the last repeat output to the legacy log_path.
                 # (So existing tooling that expects *.log can still find something.)
@@ -2187,7 +2257,13 @@ def main() -> int:
                 "wall_time_sec": wall_time_sec,
                 "env": {k: job.env.get(k) for k in sorted(job.env.keys())},
                 "log_path": str(log_path),
-                "repeats": int(job.repeats),
+                # repeats is the effective repeats actually executed.
+                "repeats": int(repeats_effective),
+                "repeats_config": int(repeats_config),
+                "repeats_computed": int(repeats_computed) if repeats_computed is not None else None,
+                "repeats_capped": bool(repeats_capped),
+                "repeat_threshold_sec": float(job.repeat_threshold_sec) if job.repeat_threshold_sec is not None else None,
+                "repeat_max_repeats": int(job.repeat_max_repeats),
                 "repeat_log_paths": repeat_log_paths,
                 "server": server_info,
                 "job_numactl": {
@@ -2225,7 +2301,7 @@ def main() -> int:
                     "job_name": job.name,
                     "script": job.script,
                     "exit_code": exit_code,
-                    "repeats": int(job.repeats),
+                    "repeats": int(repeats_effective),
                     "backend": backend,
                     "model": model,
                     "model_id": model_id,

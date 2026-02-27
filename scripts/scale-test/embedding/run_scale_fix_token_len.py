@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -417,6 +418,8 @@ class ScaleConfig:
     token_lens: List[int]
     batch_sizes: List[int]
     repeats: int
+    repeat_threshold_sec: Optional[float]
+    repeat_max_repeats: int
     warmup_runs: int
     continue_on_error: bool
     cpu_exprs: List[str]
@@ -450,6 +453,41 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         batch_sizes = [int(x) for x in (batch_sizes_raw or [])]
 
     repeats = int(run.get("repeats") or 1)
+
+    # Optional: time-threshold-based repeats.
+    # Compatible aliases (including the user-typed misspelling):
+    # - repeat_threshold_sec
+    # - repeat-threash-hold
+    repeat_threshold_raw = (
+        run.get("repeat_threshold_sec")
+        or run.get("repeat_threshold")
+        or run.get("repeat-threshold")
+        or run.get("repeat_threash_hold")
+        or run.get("repeat-threash-hold")
+        or run.get("repeat_threash_hold_sec")
+        or run.get("repeat-threash-hold-sec")
+    )
+    repeat_threshold_sec: Optional[float] = None
+    if repeat_threshold_raw is not None and str(repeat_threshold_raw).strip() != "":
+        try:
+            v = float(repeat_threshold_raw)
+        except Exception:
+            raise SystemExit("config.run.repeat_threshold_sec must be a number > 0")
+        if v > 0:
+            repeat_threshold_sec = float(v)
+
+    # Safety default: if threshold mode is not enabled and user didn't explicitly
+    # set repeats, treat repeats as 1.
+    if repeat_threshold_sec is None and ("repeats" not in run):
+        repeats = 1
+
+    repeat_max_raw = run.get("repeat_max_repeats") or run.get("repeat_max") or run.get("max_repeats")
+    repeat_max_repeats = 100
+    if repeat_max_raw is not None and str(repeat_max_raw).strip() != "":
+        try:
+            repeat_max_repeats = max(1, int(float(repeat_max_raw)))
+        except Exception:
+            raise SystemExit("config.run.repeat_max_repeats must be an integer >= 1")
     warmup_runs = int(run.get("warmup_runs") or 0)
 
     continue_on_error = bool(run.get("continue_on_error") or run.get("continue_on_failure") or False)
@@ -794,6 +832,8 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         token_lens=token_lens,
         batch_sizes=batch_sizes,
         repeats=repeats,
+        repeat_threshold_sec=repeat_threshold_sec,
+        repeat_max_repeats=repeat_max_repeats,
         warmup_runs=warmup_runs,
         continue_on_error=continue_on_error,
         cpu_exprs=cpu_exprs,
@@ -1348,6 +1388,22 @@ def _dispatch_multi_host(
     dispatch_env = _dispatch_subprocess_env()
     repo_bundle_path = (out_dir / "repo_bundle.tar.gz").resolve()
 
+    def _effective_dispatch_rc(*, ssh_rc: int, remote_run_log: Path) -> Tuple[int, Optional[int]]:
+        """Reconcile SSH transport rc with remote sweep rc.
+
+        The remote dispatch script prints a line like:
+          [dispatch] sweep_rc=0
+
+        The SSH command may still return non-zero due to post-sweep debug
+        collection steps (or other shell/transport quirks). In that case, the
+        sweep rc is the authoritative signal of success/failure.
+        """
+
+        sweep_rc = _parse_dispatch_sweep_rc(remote_run_log)
+        if sweep_rc is None:
+            return int(ssh_rc), None
+        return int(sweep_rc), int(sweep_rc)
+
     def _run_stream_to_log(cmd: List[str], *, log_path: Path, echo: bool) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("w", encoding="utf-8", errors="replace") as f:
@@ -1374,6 +1430,87 @@ def _dispatch_multi_host(
                 except Exception:
                     pass
             return int(p.wait())
+
+    prestage_cache_dir = (REPO_ROOT / "scripts/scale-test/embedding/.cache/prestage").resolve()
+
+    def _ensure_prestaged_sglang_tarball(*, log_dir: Path, echo: bool = False) -> Optional[Path]:
+        """Best-effort local clone of sglang and tarball creation for remote prestage."""
+
+        prestage_cache_dir.mkdir(parents=True, exist_ok=True)
+        clone_dir = prestage_cache_dir / "sglang"
+        tar_path = prestage_cache_dir / "sglang.tar.gz"
+        git_bin = _which("git")
+        log_lines: List[str] = []
+
+        if not git_bin:
+            (log_dir / "prestage_sglang.log").write_text("[error] local git not found\n", encoding="utf-8")
+            return None
+
+        def _run_git(args: List[str], *, cwd: Optional[Path] = None) -> bool:
+            cmd = [str(git_bin), *args]
+            log_lines.append("$ " + " ".join(shlex.quote(a) for a in cmd))
+            try:
+                p = subprocess.run(
+                    cmd,
+                    cwd=str(cwd or prestage_cache_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    env=dispatch_env,
+                )
+            except Exception as exc:
+                log_lines.append(f"[error] git invocation failed: {type(exc).__name__}: {exc}")
+                return False
+            if p.stdout:
+                log_lines.append(p.stdout)
+                if echo:
+                    sys.stdout.write(p.stdout)
+                    sys.stdout.flush()
+            return p.returncode == 0
+
+        # Ensure a usable clone.
+        if (clone_dir / ".git").is_dir():
+            # Best-effort refresh; do not fail prestage if fetch/reset fails.
+            _run_git(["-C", str(clone_dir), "fetch", "--all", "--prune"])
+            _run_git(["-C", str(clone_dir), "reset", "--hard", "origin/main"])
+        else:
+            if clone_dir.exists():
+                try:
+                    shutil.rmtree(clone_dir)
+                except Exception:
+                    pass
+            ok = _run_git(["clone", "--depth", "1", "https://github.com/sgl-project/sglang.git", str(clone_dir)])
+            if not ok:
+                (log_dir / "prestage_sglang.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+                return None
+
+        # Build tarball (include .git so remote script sees a git repo).
+        try:
+            tmp_tar = tar_path.with_suffix(tar_path.suffix + ".tmp")
+            if tmp_tar.exists():
+                try:
+                    tmp_tar.unlink()
+                except Exception:
+                    pass
+            with tarfile.open(tmp_tar, "w:gz") as tf:
+                tf.add(str(clone_dir), arcname="sglang")
+            tmp_tar.replace(tar_path)
+        except Exception as exc:
+            log_lines.append(f"[error] failed to create tarball: {type(exc).__name__}: {exc}")
+            (log_dir / "prestage_sglang.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+            return None
+
+        (log_dir / "prestage_sglang.log").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        return tar_path
+
+    def _remote_log_needs_sglang_prestage(log_text: str) -> bool:
+        t = (log_text or "").lower()
+        return (
+            "failed to clone sglang after retries" in t
+            or ("git clone failed" in t and "cloning into 'sglang'" in t)
+            or ("sglang" in t and "git" in t and "clone" in t and "failed" in t)
+        )
 
     for server in servers:
         host = str(server.host)
@@ -1474,6 +1611,25 @@ def _dispatch_multi_host(
                 before_cmds.append(cmd)
 
         pre_req_prefix = ""
+        # Export job_template model hints so pre-requirement scripts (e.g. download-models.sh)
+        # can download only what the current sweep actually uses.
+        jt_model_dir = str(scale.job_template.get("model_dir") or "").strip()
+        jt_model = str(scale.job_template.get("model") or "").strip()
+        jt_model_id = str(
+            scale.job_template.get("model_id")
+            or scale.job_template.get("served_model_name")
+            or scale.job_template.get("served_model")
+            or ""
+        ).strip()
+        env_exports: List[str] = []
+        if jt_model_dir:
+            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL_DIR={shlex.quote(jt_model_dir)}")
+        if jt_model:
+            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL={shlex.quote(jt_model)}")
+        if jt_model_id:
+            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL_ID={shlex.quote(jt_model_id)}")
+        if env_exports:
+            pre_req_prefix += " ".join(x + ";" for x in env_exports) + " "
         if before_cmds:
             pre_req_prefix += " ".join(c + ";" for c in before_cmds) + " "
         if after_cmds:
@@ -1803,6 +1959,16 @@ def _dispatch_multi_host(
             # Run the dispatch command locally (same bash logic as remote).
             remote_run_log = local_host_dir / "remote_run.log"
             rc_local = _run_stream_to_log(["bash", "-lc", remote_cmd], log_path=remote_run_log, echo=bool(tee))
+
+            eff_rc_local, sweep_rc_local = _effective_dispatch_rc(ssh_rc=int(rc_local), remote_run_log=remote_run_log)
+            if rc_local != eff_rc_local and sweep_rc_local is not None:
+                print(
+                    f"[warn] local dispatch rc mismatch (host={host}): "
+                    f"bash_rc={rc_local} but sweep_rc={sweep_rc_local}. "
+                    f"Using sweep_rc as authoritative. See {remote_run_log}"
+                )
+            rc_local = int(eff_rc_local)
+
             if rc_local != 0:
                 print(f"[error] local run failed (host={host}, rc={rc_local}). See {remote_run_log}")
                 if not scale.continue_on_error:
@@ -2047,9 +2213,105 @@ def _dispatch_multi_host(
         remote_run_log = local_host_dir / "remote_run.log"
         rc3 = _run_stream_to_log(run_cmd, log_path=remote_run_log, echo=bool(tee))
         if rc3 != 0:
-            print(f"[error] remote run failed (host={host}, rc={rc3}). See {remote_run_log}")
-            if not scale.continue_on_error:
-                return int(rc3)
+            did_retry = False
+            if (not dry_run) and (not is_local):
+                try:
+                    log_text = remote_run_log.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    log_text = ""
+
+                if _remote_log_needs_sglang_prestage(log_text):
+                    if tee:
+                        print(f"[dispatch] detected sglang clone failure; prestaging locally and retrying (host={host})")
+                    tar_path = _ensure_prestaged_sglang_tarball(log_dir=local_host_dir, echo=False)
+                    if tar_path:
+                        remote_assets_dir = f"{remote_cfg_dir}/assets"
+                        remote_tar = f"{remote_assets_dir}/sglang.tar.gz"
+
+                        # Ensure remote assets dir exists.
+                        subprocess.run(
+                            prefix
+                            + ["ssh"]
+                            + ssh_args
+                            + [target, _ssh_bash_lc_remote(f"mkdir -p {shlex.quote(remote_assets_dir)}")],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            check=False,
+                            env=dispatch_env,
+                        )
+
+                        # Upload tarball.
+                        p_tar = subprocess.run(
+                            prefix + [str(scp_bin)] + scp_args + [str(tar_path), f"{target}:{remote_tar}"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            check=False,
+                            env=dispatch_env,
+                        )
+                        (local_host_dir / "scp_prestage_sglang.log").write_text(p_tar.stdout or "", encoding="utf-8")
+
+                        if p_tar.returncode == 0:
+                            # Extract into $HOME so install_sglang.sh's default src_dir='sglang' works.
+                            extract_cmd = (
+                                "set -e; "
+                                + f"TAR={shlex.quote(remote_tar)}; "
+                                + "DEST=$HOME; "
+                                + "rm -rf \"$DEST/sglang\" >/dev/null 2>&1 || true; "
+                                + "if command -v tar >/dev/null 2>&1; then "
+                                + "  tar -xzf \"$TAR\" -C \"$DEST\"; "
+                                + "elif command -v python3 >/dev/null 2>&1; then "
+                                + "  python3 - <<'PY'\n"
+                                + "import os, tarfile\n"
+                                + "tar_path=os.environ.get('TAR')\n"
+                                + "dest=os.environ.get('DEST')\n"
+                                + "with tarfile.open(tar_path, 'r:gz') as tf: tf.extractall(dest)\n"
+                                + "print('[ok] extracted sglang tarball')\n"
+                                + "PY\n"
+                                + "else "
+                                + "  echo '[error] neither tar nor python3 available for extraction' >&2; exit 1; "
+                                + "fi"
+                            )
+                            p_ext = subprocess.run(
+                                prefix + ["ssh"] + ssh_args + [target, _ssh_bash_lc_remote(extract_cmd)],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                text=True,
+                                check=False,
+                                env=dispatch_env,
+                            )
+                            (local_host_dir / "remote_extract_prestage_sglang.log").write_text(
+                                p_ext.stdout or "", encoding="utf-8"
+                            )
+
+                            if p_ext.returncode == 0:
+                                remote_run_retry_log = local_host_dir / "remote_run.retry.log"
+                                rc_retry = _run_stream_to_log(run_cmd, log_path=remote_run_retry_log, echo=bool(tee))
+                                did_retry = True
+                                rc3 = int(rc_retry)
+
+            # Reconcile rc with remote-emitted sweep_rc (authoritative).
+            rc_log_path = (local_host_dir / "remote_run.retry.log") if did_retry else remote_run_log
+            eff_rc3, sweep_rc3 = _effective_dispatch_rc(ssh_rc=int(rc3), remote_run_log=rc_log_path)
+            if rc3 != eff_rc3 and sweep_rc3 is not None:
+                print(
+                    f"[warn] remote dispatch rc mismatch (host={host}): "
+                    f"ssh_rc={rc3} but sweep_rc={sweep_rc3}. "
+                    f"Using sweep_rc as authoritative. See {rc_log_path}"
+                )
+            rc3 = int(eff_rc3)
+
+            if rc3 != 0:
+                if did_retry:
+                    print(
+                        f"[error] remote run failed after prestage retry (host={host}, rc={rc3}). "
+                        f"See {local_host_dir / 'remote_run.retry.log'} (and {remote_run_log})"
+                    )
+                else:
+                    print(f"[error] remote run failed (host={host}, rc={rc3}). See {remote_run_log}")
+                if not scale.continue_on_error:
+                    return int(rc3)
 
         # 3b) capture server info (best-effort)
         try:
@@ -2242,85 +2504,88 @@ def _generate_auto_test_config(
             name = f"scale_fix_token_len_tok{int(tl)}_bs{int(bs)}_{model}_{backend}"
             if (variant_tag or "").strip():
                 name = f"{name}__{_safe_name(variant_tag)}"
-                env = {
-                    "MODEL": model,
-                    "BACKEND": backend,
-                    "MODEL_DIR": model_dir,
-                    "SERVED_MODEL_NAME": served_model_name,
-                    "MODEL_ID": model_id,
-                    "HOST": host,
-                    "PORT": str(port),
-                    "BASE_URL": base_url,
-                    "MODE": mode,
-                    "MAX_SAMPLES": str(max_samples),
-                    "BATCH_SIZE": str(int(bs) if int(bs) > 0 else batch_size_default),
-                    "SYNTHETIC_TOKEN_LEN": str(int(tl)),
-                    "DTYPE": dtype,
+
+            env = {
+                "MODEL": model,
+                "BACKEND": backend,
+                "MODEL_DIR": model_dir,
+                "SERVED_MODEL_NAME": served_model_name,
+                "MODEL_ID": model_id,
+                "HOST": host,
+                "PORT": str(port),
+                "BASE_URL": base_url,
+                "MODE": mode,
+                "MAX_SAMPLES": str(max_samples),
+                "BATCH_SIZE": str(int(bs) if int(bs) > 0 else batch_size_default),
+                "SYNTHETIC_TOKEN_LEN": str(int(tl)),
+                "DTYPE": dtype,
+            }
+
+            # For HTTP backends, large batch sizes on CPU can exceed the default
+            # 120s request timeout during warmup/first runs.
+            #
+            # Use job_template.embedding_http_timeout_sec / http_timeout_sec to
+            # override; otherwise default to 900s.
+            http_timeout_sec: Optional[int] = None
+            for k in ["embedding_http_timeout_sec", "http_timeout_sec", "embedding_http_timeout", "http_timeout"]:
+                v = jt.get(k)
+                if v is None or str(v).strip() == "":
+                    continue
+                try:
+                    http_timeout_sec = int(float(v))
+                    break
+                except Exception:
+                    continue
+            if http_timeout_sec is None:
+                http_timeout_sec = 900
+            env.setdefault("EMBEDDING_HTTP_TIMEOUT", str(http_timeout_sec))
+
+            # Merge user-provided env first (can override any defaults).
+            for k, v in extra_env.items():
+                env[str(k)] = str(v)
+
+            # Optional sweep override (server + job): SGLANG_MAX_TOTAL_TOKENS.
+            if str(sglang_max_total_tokens or "").strip():
+                env["SGLANG_MAX_TOTAL_TOKENS"] = str(sglang_max_total_tokens).strip()
+
+            # Auto-populate benchmark NUMA binding when safe.
+            # (This wraps the job command with numactl in run_auto_test.py.)
+            if (cpu_expr or "").strip() and not any(
+                str(extra_env.get(k) or "").strip()
+                for k in [
+                    "NUMACTL_CORES",
+                    "NUMACTL_CPUNODEBIND",
+                    "NUMACTL_MEMBIND",
+                    "SERVER_NUMACTL_CORES",
+                    "SERVER_NUMACTL_CPUNODEBIND",
+                    "SERVER_NUMACTL_MEMBIND",
+                ]
+            ):
+                if not str(env.get("NUMACTL_CORES") or "").strip():
+                    env["NUMACTL_CORES"] = cpu_expr.strip()
+                # Also bind the *server* side explicitly. This is important
+                # because some environments accept systemd-run properties
+                # but do not actually enforce cpusets, and sglang can
+                # otherwise fan out across all host CPUs.
+                if not str(env.get("SERVER_NUMACTL_CORES") or "").strip():
+                    env["SERVER_NUMACTL_CORES"] = cpu_expr.strip()
+                # Do not auto-add NUMACTL_CPUNODEBIND/NUMACTL_MEMBIND.
+
+            jobs.append(
+                {
+                    "name": name,
+                    "script": "run_fix_token_len",
+                    "args": {},
+                    "warmup_runs": int(scale.warmup_runs),
+                    "repeats": int(1 if scale.repeat_threshold_sec is not None else repeats),
+                    "repeat_threshold_sec": float(scale.repeat_threshold_sec) if scale.repeat_threshold_sec is not None else None,
+                    "repeat_max_repeats": int(scale.repeat_max_repeats),
+                    "restart_servers": restart_servers,
+                    "stop_server_after_job": stop_server_after_job,
+                    "emon_enable": emon_enable,
+                    "env": env,
                 }
-
-                # For HTTP backends, large batch sizes on CPU can exceed the default
-                # 120s request timeout during warmup/first runs.
-                #
-                # Use job_template.embedding_http_timeout_sec / http_timeout_sec to
-                # override; otherwise default to 900s.
-                http_timeout_sec: Optional[int] = None
-                for k in ["embedding_http_timeout_sec", "http_timeout_sec", "embedding_http_timeout", "http_timeout"]:
-                    v = jt.get(k)
-                    if v is None or str(v).strip() == "":
-                        continue
-                    try:
-                        http_timeout_sec = int(float(v))
-                        break
-                    except Exception:
-                        continue
-                if http_timeout_sec is None:
-                    http_timeout_sec = 900
-                env.setdefault("EMBEDDING_HTTP_TIMEOUT", str(http_timeout_sec))
-
-                # Merge user-provided env first (can override any defaults).
-                for k, v in extra_env.items():
-                    env[str(k)] = str(v)
-
-                # Optional sweep override (server + job): SGLANG_MAX_TOTAL_TOKENS.
-                if str(sglang_max_total_tokens or "").strip():
-                    env["SGLANG_MAX_TOTAL_TOKENS"] = str(sglang_max_total_tokens).strip()
-
-                # Auto-populate benchmark NUMA binding when safe.
-                # (This wraps the job command with numactl in run_auto_test.py.)
-                if (cpu_expr or "").strip() and not any(
-                    str(extra_env.get(k) or "").strip()
-                    for k in [
-                        "NUMACTL_CORES",
-                        "NUMACTL_CPUNODEBIND",
-                        "NUMACTL_MEMBIND",
-                        "SERVER_NUMACTL_CORES",
-                        "SERVER_NUMACTL_CPUNODEBIND",
-                        "SERVER_NUMACTL_MEMBIND",
-                    ]
-                ):
-                    if not str(env.get("NUMACTL_CORES") or "").strip():
-                        env["NUMACTL_CORES"] = cpu_expr.strip()
-                    # Also bind the *server* side explicitly. This is important
-                    # because some environments accept systemd-run properties
-                    # but do not actually enforce cpusets, and sglang can
-                    # otherwise fan out across all host CPUs.
-                    if not str(env.get("SERVER_NUMACTL_CORES") or "").strip():
-                        env["SERVER_NUMACTL_CORES"] = cpu_expr.strip()
-                    # Do not auto-add NUMACTL_CPUNODEBIND/NUMACTL_MEMBIND.
-
-                jobs.append(
-                    {
-                        "name": name,
-                        "script": "run_fix_token_len",
-                        "args": {},
-                        "warmup_runs": int(scale.warmup_runs),
-                        "repeats": int(repeats),
-                        "restart_servers": restart_servers,
-                        "stop_server_after_job": stop_server_after_job,
-                        "emon_enable": emon_enable,
-                        "env": env,
-                    }
-                )
+            )
 
     cfg["jobs"] = jobs
     return cfg
