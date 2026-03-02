@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "description": "Scale-test (VL): sweep IMAGE_SIZE for run_fix_image_size using vLLM OpenAI server (experimental; vLLM may not support multimodal embeddings).",
+  "template_auto_test_config": "scripts/auto-test/vl-embedding/config_fix_image_size.json",
+  "result_root": "scripts/scale-test/vl-embedding/result/fix_image_size",
+  "run": {
+    "sweep_env_key": "IMAGE_SIZE",
+    "sweep_values": [
+      "224x224",
+      "384x384"
+    ],
+    "batch_sizes": [
+      1
+    ],
+    "repeat_threshold_sec": 1,
+    "repeat_max_repeats": 5,
+    "warmup_runs": 1,
+    "continue_on_error": true,
+    "cpu": {
+      "cpus": [
+        "0-31"
+      ]
+    },
+    "sglang_max_total_tokens": [
+      ""
+    ],
+    "servers": [],
+    "remote_repo_dir": "",
+    "remote_result_root": "",
+    "remote_python": "",
+    "install_requirements": false,
+    "requirements_profile": "",
+    "requirements_files": [
+      "requirements.txt"
+    ],
+    "pip_extra_args": [],
+    "ssh": {
+      "user": "",
+      "port": 22,
+      "identity_file": "",
+      "options": []
+    }
+  },
+  "job_template": {
+    "script": "run_fix_image_size",
+    "backend": "vllm-http",
+    "device": "cuda",
+    "conda_env": "",
+    "model": "qwen3-vl-embedding-2b",
+    "model_dir": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-VL-Embedding-2B",
+    "served_model_name": "Qwen3-VL-Embedding-2B",
+    "model_id": "Qwen3-VL-Embedding-2B",
+    "host": "0.0.0.0",
+    "port": 30000,
+    "base_url": "http://127.0.0.1:30000",
+    "max_samples": 16,
+    "batch_size": 1,
+    "dtype": "auto",
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "emon_enable": false,
+    "extra_env": {
+      "IMAGE_TRANSPORT": "data-url",
+      "WARMUP_SAMPLES": "1",
+      "EMBEDDING_HTTP_TIMEOUT": "900",
+      "IMAGE_DIR": "scripts/scale-test/vl-embedding/images",
+      "VLLM_CONDA_ENV": "xtang-vllm-latest",
+      "VLLM_PYTHON": ""
+    }
+  }
+}

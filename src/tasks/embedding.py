@@ -278,6 +278,7 @@ def load_embedding_session(
             api_key=api_key,
             timeout=timeout,
             encoding_format=encoding_format,
+            image_transport=image_transport,
         )
 
     if backend in {"vllm", "vllm-offline"}:

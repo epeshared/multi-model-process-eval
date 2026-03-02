@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 import base64
+import ipaddress
 import mimetypes
 import os
+from urllib.parse import urlparse
 
 import torch
 
@@ -21,6 +23,33 @@ def _norm_base_url(base_url: str) -> str:
     if not b:
         raise ValueError("base_url is required")
     return b
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    """Return True if base_url points to localhost/loopback.
+
+    This is used to avoid accidental proxying of localhost traffic via
+    `http_proxy` / `https_proxy`, which can cause surprising 403/HTML responses.
+    """
+
+    try:
+        p = urlparse(base_url)
+    except Exception:
+        return False
+
+    host = (p.hostname or "").strip().lower()
+    if not host:
+        return False
+
+    if host in {"localhost"}:
+        return True
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+
+    return bool(ip.is_loopback or ip.is_unspecified)
 
 
 class SGLangHTTPEmbeddingClient:
@@ -59,6 +88,10 @@ class SGLangHTTPEmbeddingClient:
         self.timeout = float(timeout)
         self.image_transport = (image_transport or "data-url").lower()
         self.session = requests.Session() if _REQUESTS_OK else None
+
+        # For local servers, bypass env proxies by default.
+        if self.session is not None and _is_local_base_url(self.base_url):
+            self.session.trust_env = False
 
         # ✅ 方案A：给 session 打 tag（上层只根据 tag 才会 start/stop profile）
         self._backend_tag = "sglang-http"
@@ -308,15 +341,17 @@ class SGLangHTTPEmbeddingClient:
             if not probed and inputs:
                 probed = True
                 try:
-                    probe_inputs = [inputs[0], {"text": "padding", "image": "/no/such/file.jpg"}]
-                    probe_vecs = self._encode_v1_multimodal_any(probe_inputs)
-                    if len(probe_vecs) >= 2:
-                        a = torch.tensor(probe_vecs[0], dtype=torch.float32)
-                        b = torch.tensor(probe_vecs[1], dtype=torch.float32)
-                        if torch.allclose(a, b, atol=0.0, rtol=0.0):
-                            raise RuntimeError(
-                                "SGLang server appears to ignore image inputs for /v1/embeddings (multimodal)."
-                            )
+                    # Probe multimodal behavior by comparing embeddings of two different *valid* images.
+                    # Avoid using a fake path, since it can legitimately fallback to text-only embedding.
+                    if len(inputs) >= 2:
+                        probe_vecs = self._encode_v1_multimodal_any([inputs[0], inputs[1]])
+                        if len(probe_vecs) >= 2:
+                            a = torch.tensor(probe_vecs[0], dtype=torch.float32)
+                            b = torch.tensor(probe_vecs[1], dtype=torch.float32)
+                            if torch.allclose(a, b, atol=0.0, rtol=0.0):
+                                raise RuntimeError(
+                                    "SGLang server appears to ignore image inputs for /v1/embeddings (multimodal)."
+                                )
                 except RuntimeError:
                     raise
                 except Exception:

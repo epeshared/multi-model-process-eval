@@ -134,7 +134,20 @@ def _flatten_pivot_columns(columns: Any, suffix: str) -> List[str]:
         except Exception:
             out.append(f"{col}_{suffix}")
             continue
-        out.append(f"tok{int(tl)}_bs{int(bs)}_{suffix}")
+
+        tl_s = str(tl).strip()
+        bs_s = str(bs).strip()
+        try:
+            tl_tag = f"tok{int(float(tl_s))}"
+        except Exception:
+            tl_tag = f"tok{_sanitize_header(tl_s)}"
+
+        try:
+            bs_tag = f"bs{int(float(bs_s))}"
+        except Exception:
+            bs_tag = f"bs{_sanitize_header(bs_s)}"
+
+        out.append(f"{tl_tag}_{bs_tag}_{suffix}")
     return out
 
 

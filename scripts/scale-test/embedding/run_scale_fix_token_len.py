@@ -415,7 +415,7 @@ class SSHDispatchConfig:
 class ScaleConfig:
     template_auto_test_config: Path
     result_root: Path
-    token_lens: List[int]
+    token_lens: List[str]
     batch_sizes: List[int]
     repeats: int
     repeat_threshold_sec: Optional[float]
@@ -425,6 +425,7 @@ class ScaleConfig:
     cpu_exprs: List[str]
     mem_gb: Optional[float]
     sglang_max_total_tokens: List[str]
+    sweep_env_key: str
     job_template: Dict[str, Any]
     emon_process_after_run: bool
     emon_process_cmd: List[str]
@@ -443,9 +444,19 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         result_root = (REPO_ROOT / result_root).resolve()
 
     run = raw.get("run") or {}
-    token_lens = [int(x) for x in (run.get("token_lens") or [])]
-    if not token_lens:
-        raise SystemExit("config.run.token_lens is empty")
+    sweep_env_key = str(run.get("sweep_env_key") or run.get("sweep_key") or "").strip()
+    sweep_values_raw = run.get("sweep_values")
+
+    token_lens: List[str] = []
+    if sweep_env_key and sweep_values_raw is not None:
+        token_lens = [str(x).strip() for x in (sweep_values_raw or []) if str(x).strip()]
+        if not token_lens:
+            raise SystemExit("config.run.sweep_values is empty")
+    else:
+        token_lens_int = [int(x) for x in (run.get("token_lens") or [])]
+        if not token_lens_int:
+            raise SystemExit("config.run.token_lens is empty")
+        token_lens = [str(int(x)) for x in token_lens_int]
 
     batch_sizes_raw = run.get("batch_sizes")
     batch_sizes: List[int] = []
@@ -839,6 +850,7 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         cpu_exprs=cpu_exprs,
         mem_gb=mem_gb_f,
         sglang_max_total_tokens=sglang_mtt,
+        sweep_env_key=sweep_env_key,
         job_template=job_template,
         emon_process_after_run=emon_process_after_run,
         emon_process_cmd=[str(x) for x in process_cmd],
@@ -2419,6 +2431,14 @@ def _generate_auto_test_config(
     max_samples = int(jt.get("max_samples") or 1000)
     batch_size_default = int(jt.get("batch_size") or 100)
     dtype = str(jt.get("dtype") or "bfloat16").strip()
+    script_key = str(
+        jt.get("script")
+        or jt.get("script_alias")
+        or jt.get("job_script")
+        or "run_fix_token_len"
+    ).strip()
+    if not script_key:
+        script_key = "run_fix_token_len"
 
     restart_servers = bool(jt.get("restart_servers", True))
     stop_server_after_job = bool(jt.get("stop_server_after_job", True))
@@ -2426,6 +2446,28 @@ def _generate_auto_test_config(
     extra_env = jt.get("extra_env") or {}
     if not isinstance(extra_env, dict):
         extra_env = {}
+
+    # Device selection (cpu/cuda) via scale-test JSON.
+    # This controls which SGLang start script is used.
+    jt_device_raw = str(jt.get("device") or "").strip().lower()
+    device: str = ""
+    if jt_device_raw:
+        if jt_device_raw in {"cuda", "gpu"}:
+            device = "cuda"
+        elif jt_device_raw in {"cpu"}:
+            device = "cpu"
+        else:
+            raise SystemExit("job_template.device must be 'cpu' or 'cuda' (or 'gpu')")
+
+    # Optional: conda env name for SGLang server python (portable; avoids absolute paths).
+    # - If user already provided SGLANG_PYTHON or SGLANG_CONDA_ENV via extra_env, do not override.
+    # - When set, start scripts will run: conda run -n <env> python ...
+    jt_conda_env = str(jt.get("conda_env") or jt.get("sglang_conda_env") or "").strip()
+    if jt_conda_env:
+        has_python_override = bool(str(extra_env.get("SGLANG_PYTHON") or "").strip())
+        has_conda_override = bool(str(extra_env.get("SGLANG_CONDA_ENV") or "").strip())
+        if not has_python_override and not has_conda_override:
+            extra_env["SGLANG_CONDA_ENV"] = jt_conda_env
 
     # -------------------------
     # Auto NUMA binding (best-effort)
@@ -2458,11 +2500,30 @@ def _generate_auto_test_config(
         servers = cfg.get("servers") or {}
         if isinstance(servers, dict) and backend in servers and isinstance(servers.get(backend), dict):
             s = dict(servers[backend])
+
+            # Select backend start script based on requested device.
+            # NOTE: keep template default if device not specified.
+            if device:
+                if backend == "sglang":
+                    if device == "cuda":
+                        s["start_script"] = "scripts/embedding/sglang/start_sglang_server_cuda.sh"
+                    else:
+                        s["start_script"] = "scripts/embedding/sglang/start_sglang_server.sh"
+                elif backend in {"vllm-http", "vllm"}:
+                    # vLLM start scripts in this repo are split by device.
+                    if device == "cuda":
+                        s["start_script"] = "scripts/embedding/vllm/start_vllm_server_cuda.sh"
+                    else:
+                        s["start_script"] = "scripts/embedding/vllm/start_vllm_server.sh"
+
             env_from_job = dict(s.get("env_from_job") or {})
             for k in extra_env.keys():
                 ks = str(k)
-                if ks.startswith("SGLANG_"):
+                if ks.startswith("SGLANG_") or ks.startswith("VLLM_"):
                     env_from_job[ks] = ks
+            # Forward device selection into server env when provided.
+            if device:
+                env_from_job["DEVICE"] = "DEVICE"
             # Also forward sweep-provided SGLANG settings that may not exist in extra_env.
             if str(sglang_max_total_tokens or "").strip():
                 env_from_job["SGLANG_MAX_TOTAL_TOKENS"] = "SGLANG_MAX_TOTAL_TOKENS"
@@ -2501,7 +2562,21 @@ def _generate_auto_test_config(
     repeats = max(1, int(scale.repeats))
     for bs in scale.batch_sizes:
         for tl in scale.token_lens:
-            name = f"scale_fix_token_len_tok{int(tl)}_bs{int(bs)}_{model}_{backend}"
+            tl_s = str(tl).strip()
+
+            # Determine which env var represents the sweep axis.
+            sweep_key = str(scale.sweep_env_key or "").strip()
+            if not sweep_key:
+                # Backward compatibility for the original token_len runner.
+                if str(mode or "").strip().lower() in {"input_len", "input", "len", "char", "chars"}:
+                    sweep_key = "SYNTHETIC_INPUT_LEN"
+                else:
+                    sweep_key = "SYNTHETIC_TOKEN_LEN"
+
+            if sweep_key == "SYNTHETIC_TOKEN_LEN" and tl_s.isdigit():
+                name = f"scale_fix_token_len_tok{int(tl_s)}_bs{int(bs)}_{model}_{backend}"
+            else:
+                name = f"scale_fix_token_len_{_safe_name(sweep_key)}_{_safe_name(tl_s)}_bs{int(bs)}_{model}_{backend}"
             if (variant_tag or "").strip():
                 name = f"{name}__{_safe_name(variant_tag)}"
 
@@ -2517,9 +2592,14 @@ def _generate_auto_test_config(
                 "MODE": mode,
                 "MAX_SAMPLES": str(max_samples),
                 "BATCH_SIZE": str(int(bs) if int(bs) > 0 else batch_size_default),
-                "SYNTHETIC_TOKEN_LEN": str(int(tl)),
                 "DTYPE": dtype,
             }
+
+            if device:
+                env["DEVICE"] = device
+
+            # Set the sweep value into the desired env key.
+            env[sweep_key] = tl_s
 
             # For HTTP backends, large batch sizes on CPU can exceed the default
             # 120s request timeout during warmup/first runs.
@@ -2574,7 +2654,7 @@ def _generate_auto_test_config(
             jobs.append(
                 {
                     "name": name,
-                    "script": "run_fix_token_len",
+                    "script": script_key,
                     "args": {},
                     "warmup_runs": int(scale.warmup_runs),
                     "repeats": int(1 if scale.repeat_threshold_sec is not None else repeats),

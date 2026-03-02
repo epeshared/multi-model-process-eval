@@ -1026,6 +1026,17 @@ def _ensure_server(
         if job_key in job.env:
             env[env_key] = str(job.env[job_key])
 
+    # If the user doesn't explicitly provide SGLANG_PYTHON, default it to the
+    # current runner's interpreter. This makes JSON configs portable across
+    # hosts (especially for remote dispatch) as long as the runner is executed
+    # under the desired conda env.
+    if (
+        spec.backend == "sglang"
+        and not str(env.get("SGLANG_PYTHON") or "").strip()
+        and not str(env.get("SGLANG_CONDA_ENV") or "").strip()
+    ):
+        env["SGLANG_PYTHON"] = sys.executable
+
     # For sglang CPU+AMX: align sglang's OpenMP thread binding with our server
     # NUMA binding to avoid pinning to disallowed CPUs (which can segfault in
     # sgl_kernel.init_cpu_threads_env).
@@ -1521,6 +1532,10 @@ def _infer_token_len(*, script: str, env: Dict[str, Any]) -> str:
             # Keep consistent with scripts/embedding/mteb/run_mteb.sh and run_mteb.py defaults.
             return str(v) if v not in (None, "") else "512"
 
+        if script == "run_fix_image_size":
+            v = env.get("IMAGE_SIZE")
+            return str(v) if v not in (None, "") else ""
+
         if script == "run_fix_token_len":
             mode = str(env.get("MODE") or "").strip().lower()
             if mode in {"token_len", "tokens", "token", "tok"}:
@@ -1890,7 +1905,7 @@ def main() -> int:
                         continue
 
                     # We don't have per-repeat exit codes in logs; assume OK if parsable.
-                    if script in ("run_embedding_yahoo", "run_fix_token_len"):
+                    if script in ("run_embedding_yahoo", "run_fix_token_len", "run_fix_image_size"):
                         metrics_i = _parse_embedding_metrics(text_i)
                     elif script == "run_mteb":
                         tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
@@ -1921,7 +1936,7 @@ def main() -> int:
                 metrics = _aggregate_repeat_metrics(script=script, per_repeat=per_repeat)
             else:
                 metrics = {}
-                if script in ("run_embedding_yahoo", "run_fix_token_len"):
+                if script in ("run_embedding_yahoo", "run_fix_token_len", "run_fix_image_size"):
                     if log_path.exists():
                         text = log_path.read_text(encoding="utf-8")
                         metrics = _parse_embedding_metrics(text)
@@ -2168,7 +2183,7 @@ def main() -> int:
                         first_nonzero_exit_code = int(rc_i)
 
                     # Parse per-repeat metrics (best-effort).
-                    if job.script in ("run_embedding_yahoo", "run_fix_token_len"):
+                    if job.script in ("run_embedding_yahoo", "run_fix_token_len", "run_fix_image_size"):
                         metrics_i = _parse_embedding_metrics(out_i)
                     elif job.script == "run_mteb":
                         tasks_i: List[str] = []

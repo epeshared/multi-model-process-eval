@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "description": "SMOKE (VL): minimal IMAGE_SIZE sweep to validate server startup + one job.",
+  "template_auto_test_config": "scripts/auto-test/vl-embedding/config_fix_image_size.json",
+  "result_root": "scripts/scale-test/vl-embedding/result/fix_image_size_smoke",
+  "run": {
+    "sweep_env_key": "IMAGE_SIZE",
+    "sweep_values": ["224x224"],
+    "batch_sizes": [1],
+    "repeat_threshold_sec": 1,
+    "repeat_max_repeats": 1,
+    "warmup_runs": 0,
+    "continue_on_error": false,
+    "cpu": {"cpus": ["0-3"]},
+    "sglang_max_total_tokens": [""],
+    "servers": [],
+    "remote_repo_dir": "",
+    "remote_result_root": "",
+    "remote_python": "",
+    "install_requirements": false,
+    "requirements_profile": "",
+    "requirements_files": ["requirements.txt"],
+    "pip_extra_args": [],
+    "ssh": {"user": "", "port": 22, "identity_file": "", "options": []}
+  },
+  "job_template": {
+    "script": "run_fix_image_size",
+    "backend": "sglang",
+    "device": "cuda",
+    "model": "qwen3-vl-embedding-2b",
+    "model_dir": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-VL-Embedding-2B",
+    "served_model_name": "Qwen3-VL-Embedding-2B",
+    "model_id": "Qwen3-VL-Embedding-2B",
+    "host": "0.0.0.0",
+    "port": 30000,
+    "base_url": "http://127.0.0.1:30000",
+    "max_samples": 4,
+    "batch_size": 1,
+    "dtype": "bfloat16",
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "emon_enable": false,
+    "extra_env": {
+      "SGLANG_ENABLE_MULTIMODAL": "1",
+      "IMAGE_TRANSPORT": "data-url",
+      "WARMUP_SAMPLES": "0",
+      "EMBEDDING_HTTP_TIMEOUT": "900",
+      "IMAGE_DIR": "scripts/scale-test/vl-embedding/images",
+      "SGLANG_PYTHON": "/root/miniforge3/envs/xtang-embedding-sglang/bin/python"
+    }
+  },
+  "emon": {
+    "process_after_run": false,
+    "process_cmd": ["emon", "-process-pyedp", "/opt/intel/sep/config/edp/pyedp_config.txt"],
+    "expected_output": "summary.xlsx"
+  }
+}

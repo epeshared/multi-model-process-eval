@@ -33,6 +33,7 @@
   },
   "job_template": {
     "backend": "sglang",
+    "device": "cpu",
     "model": "qwen3-embedding-4b",
     "model_dir": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-4B",
     "served_model_name": "Qwen3-Embedding-4B",

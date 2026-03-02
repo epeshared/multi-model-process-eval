@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "description": "Scale-test (VL): sweep IMAGE_SIZE for Qwen3-VL image embedding via SGLang, with remote SSH dispatch (t-cloud example).",
+  "template_auto_test_config": "scripts/auto-test/vl-embedding/config_fix_image_size.json",
+  "result_root": "scripts/scale-test/vl-embedding/result/fix_image_size",
+  "run": {
+    "sweep_env_key": "IMAGE_SIZE",
+    "sweep_values": [
+      "224x224",
+      "384x384",
+      "512x512",
+      "1024x1024",
+      "1280x720",
+      "1920x1080"
+    ],
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "repeat_threshold_sec": 1,
+    "warmup_runs": 1,
+    "continue_on_error": true,
+    "servers": [
+      {
+        "ip": "82.157.169.128",
+        "username": "ubuntu",
+        "password": null,
+        "ssh_options": [
+          "ProxyCommand=nc -x proxy-shz.intel.com:1080 -X 5 %h %p",
+          "ConnectTimeout=10",
+          "ServerAliveInterval=30",
+          "ServerAliveCountMax=3"
+        ],
+        "conda_env": "sglang-cpu",
+        "install_requirements": true,
+        "requirements_files": [
+          "requirements-emon.txt",
+          "requirements-mteb.txt",
+          "requirements.txt"
+        ],
+        "pre_requirements": [
+          {
+            "file": "scripts/scale-test/pre-requirements/install_miniforge3_linux_x86_64.sh",
+            "stage": "before_conda",
+            "mode": "bash"
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/install_sglang_system_deps.sh",
+            "stage": "before_conda",
+            "mode": "bash"
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/enable_miniforge_conda.sh",
+            "stage": "before_conda",
+            "mode": "source"
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/ensure_conda_env.sh",
+            "stage": "before_conda",
+            "mode": "bash"
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/install_sglang.sh",
+            "stage": "after_conda",
+            "mode": "bash"
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/download-models.sh",
+            "stage": "after_conda",
+            "mode": "bash"
+          }
+        ]
+      }
+    ],
+    "remote_repo_dir": "/home/ubuntu/multi-model-process-eval",
+    "remote_result_root": "/home/ubuntu/mmpe-scale-test/vl-embedding/result/fix_image_size",
+    "remote_python": "",
+    "install_requirements": false,
+    "requirements_profile": "cpu",
+    "requirements_files": [
+      "requirements.txt"
+    ],
+    "pip_extra_args": [],
+    "ssh": {
+      "user": "root",
+      "port": 22,
+      "identity_file": "",
+      "options": []
+    }
+  },
+  "job_template": {
+    "script": "run_fix_image_size",
+    "backend": "sglang",
+    "model": "qwen3-vl-embedding-2b",
+    "model_dir": "/home/ubuntu/models/Qwen/Qwen3-VL-Embedding-2B",
+    "served_model_name": "Qwen3-VL-Embedding-2B",
+    "model_id": "Qwen3-VL-Embedding-2B",
+    "host": "0.0.0.0",
+    "port": 30000,
+    "base_url": "http://127.0.0.1:30000",
+    "max_samples": 256,
+    "batch_size": 8,
+    "dtype": "bfloat16",
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "emon_enable": false,
+    "extra_env": {
+      "SGLANG_ENABLE_MULTIMODAL": "1",
+      "IMAGE_TRANSPORT": "data-url",
+      "WARMUP_SAMPLES": "1",
+      "EMBEDDING_HTTP_TIMEOUT": "900",
+      "IMAGE_DIR": "scripts/scale-test/vl-embedding/images",
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "emon": {
+    "process_after_run": false,
+    "process_cmd": [
+      "emon",
+      "-process-pyedp",
+      "/opt/intel/sep/config/edp/pyedp_config.txt"
+    ],
+    "expected_output": "summary.xlsx"
+  }
+}

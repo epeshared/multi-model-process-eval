@@ -26,6 +26,32 @@ is on your `PATH`. Make sure your active Python environment has the required dep
 
 - `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
 
+Device selection:
+
+- Set `job_template.device` to `"cpu"` or `"cuda"` in your scale-test JSON.
+	- `cuda` uses `scripts/embedding/sglang/start_sglang_server_cuda.sh`
+	- `cpu` uses `scripts/embedding/sglang/start_sglang_server.sh`
+
+Python selection (`SGLANG_PYTHON`):
+
+- You can omit `SGLANG_PYTHON` in JSON. When starting an SGLang server, the auto-test runner defaults it to its own interpreter (`sys.executable`).
+- Local runs still need you to execute the runner under the right env (e.g. `conda run -n <env> python ...` / `conda run -n <env> bash ...`), otherwise the default interpreter may not have `sglang` installed.
+- Optional (JSON-only, portable): set `job_template.conda_env` to a conda env name (e.g. `"xtang-embedding-cuda"`). This will set `SGLANG_CONDA_ENV` and the server start script will run via `conda run -n <env> python ...`.
+
+## Generate local test images (different resolutions)
+
+For image-embedding benchmarks, you can generate a deterministic set of local images with arbitrary
+resolutions (M×N) and avoid relying on external URLs:
+
+- `python3 scripts/scale-test/embedding/gen_test_images.py --out /tmp/mmpe_imgs --sizes 224x224,384x384,512x512,1024x1024,1280x720,1920x1080 --per-size 4`
+
+This produces files like `img_1280x720_00012.png` under the output folder.
+
+Notes:
+
+- Pillow is already included in `requirements-cpu.txt` and `requirements-cuda.txt`.
+- For throughput/latency tests, synthetic images (checker/gradient/noise) are usually sufficient.
+
 ### Resume an interrupted run (skip completed)
 
 If a run was interrupted (SSH disconnect, reboot, etc), you can re-run the same

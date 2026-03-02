@@ -48,8 +48,26 @@ EOF
       exit 2
       ;;
     --)
+      # Detect optional flags (vLLM versions differ in how embeddings are enabled).
+      VLLM_HELP_TEXT="$("${PYTHON_CMD[@]}" -m vllm.entrypoints.openai.api_server --help 2>/dev/null || true)"
+
+      CONVERT_ARG=()
+      if [[ -n "$VLLM_HELP_TEXT" ]] && grep -Eq -- '^\s*--convert\b' <<<"$VLLM_HELP_TEXT"; then
+        CONVERT_ARG=(--convert embed)
+      fi
+
+      PROMPT_EMBEDS_ARG=()
+      if [[ -n "$VLLM_HELP_TEXT" ]] && grep -Eq -- '^\s*--enable-prompt-embeds\b' <<<"$VLLM_HELP_TEXT"; then
+        PROMPT_EMBEDS_ARG=(--enable-prompt-embeds)
+      fi
+
+      MM_EMBEDS_ARG=()
+      if [[ -n "$VLLM_HELP_TEXT" ]] && grep -Eq -- '^\s*--enable-mm-embeds\b' <<<"$VLLM_HELP_TEXT"; then
+        MM_EMBEDS_ARG=(--enable-mm-embeds)
+      fi
+
       shift
-      EXTRA_VLLM_ARGS+=("$@")
+        "${PYTHON_CMD[@]}" -m vllm.entrypoints.openai.api_server
       break
       ;;
     *)
@@ -57,6 +75,9 @@ EOF
       shift
       ;;
   esac
+          "${CONVERT_ARG[@]}"
+          "${PROMPT_EMBEDS_ARG[@]}"
+          "${MM_EMBEDS_ARG[@]}"
 done
 
 # ===== WORK_HOME (scripts/embedding) =====
@@ -117,16 +138,40 @@ mkdir -p "$LOG_DIR"
 export CUDA_VISIBLE_DEVICES=""
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
-echo "python=$(command -v python)"
+# Allow choosing python via env (portable in scale-test).
+PYTHON_CMD=()
+if [[ -n "${VLLM_PYTHON:-}" ]]; then
+  PYTHON_CMD=("${VLLM_PYTHON}")
+elif [[ -n "${VLLM_CONDA_ENV:-}" ]]; then
+  if ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: conda not found on PATH (needed for VLLM_CONDA_ENV=${VLLM_CONDA_ENV})" >&2
+    exit 127
+  fi
+  PYTHON_CMD=(conda run -n "${VLLM_CONDA_ENV}" python)
+else
+  PYTHON_BIN="$(command -v python || true)"
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    PYTHON_BIN="$(command -v python3 || true)"
+  fi
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "ERROR: python not found on PATH" >&2
+    exit 127
+  fi
+  PYTHON_CMD=("${PYTHON_BIN}")
+fi
 
-python -c "import vllm" >/dev/null 2>&1 || {
+echo "PYTHON_BIN=${PYTHON_CMD[*]}"
+
+echo "python=${PYTHON_CMD[*]}"
+
+"${PYTHON_CMD[@]}" -c "import vllm" >/dev/null 2>&1 || {
   echo "ERROR: vLLM is not installed in this environment."
   echo "Install with: pip install vllm (or your pinned requirements)."
   exit 1
 }
 
 # Print key versions for easier debugging.
-python - <<'PY'
+"${PYTHON_CMD[@]}" - <<'PY'
 import importlib.metadata as m
 
 def v(name: str) -> str:
@@ -141,7 +186,7 @@ print("torch", v("torch"))
 PY
 
 # Preflight import check.
-python - <<'PY'
+"${PYTHON_CMD[@]}" - <<'PY'
 import sys
 try:
   from openai.types.chat import ChatCompletionFunctionToolParam  # noqa: F401
@@ -160,7 +205,7 @@ except Exception as e:
 PY
 
 # Warn if torch still sees CUDA (you may be in a GPU torch build).
-python - <<'PY'
+"${PYTHON_CMD[@]}" - <<'PY'
 import torch
 if torch.cuda.is_available():
     print("WARN: torch.cuda.is_available() == True, but this script forces CPU via CUDA_VISIBLE_DEVICES=''.")
@@ -171,7 +216,7 @@ PY
 
 # Fail fast for FP8 (float8) checkpoints on CPU.
 # Some models don't declare FP8 in config.json, but their weights are stored as float8.
-python - <<'PY'
+"${PYTHON_CMD[@]}" - <<'PY'
 import os
 import sys
 
@@ -220,12 +265,35 @@ if found is not None:
 PY
 
 # Detect whether vLLM api_server supports --device
-VLLM_HELP_TEXT="$(python -m vllm.entrypoints.openai.api_server --help 2>/dev/null || true)"
+VLLM_HELP_TEXT="$("${PYTHON_CMD[@]}" -m vllm.entrypoints.openai.api_server --help 2>/dev/null || true)"
 DEVICE_ARG=()
 if [[ -n "${VLLM_HELP_TEXT}" ]] && grep -Eq -- '^\s*--device\b' <<<"${VLLM_HELP_TEXT}"; then
   DEVICE_ARG=(--device cpu)
 else
   echo "WARN: vLLM api_server has no --device flag; relying on CUDA_VISIBLE_DEVICES='' only." >&2
+fi
+
+# vLLM version compatibility:
+# - Older versions exposed /v1/embeddings by default.
+# - Newer versions require embedding-mode args (runner=pooling, convert=embed).
+RUNNER_ARG=()
+if [[ -n "${VLLM_HELP_TEXT}" ]] && grep -Eq -- '^\s*--runner\b' <<<"${VLLM_HELP_TEXT}"; then
+  RUNNER_ARG=(--runner pooling)
+fi
+
+CONVERT_ARG=()
+if [[ -n "${VLLM_HELP_TEXT}" ]] && grep -Eq -- '^\s*--convert\b' <<<"${VLLM_HELP_TEXT}"; then
+  CONVERT_ARG=(--convert embed)
+fi
+
+PROMPT_EMBEDS_ARG=()
+if [[ -n "${VLLM_HELP_TEXT}" ]] && grep -Eq -- '^\s*--enable-prompt-embeds\b' <<<"${VLLM_HELP_TEXT}"; then
+  PROMPT_EMBEDS_ARG=(--enable-prompt-embeds)
+fi
+
+MM_EMBEDS_ARG=()
+if [[ -n "${VLLM_HELP_TEXT}" ]] && grep -Eq -- '^\s*--enable-mm-embeds\b' <<<"${VLLM_HELP_TEXT}"; then
+  MM_EMBEDS_ARG=(--enable-mm-embeds)
 fi
 
 QUANT_ARG=()
@@ -274,14 +342,17 @@ else
 fi
 
 CMD=(
-  python -m vllm.entrypoints.openai.api_server
+  "${PYTHON_CMD[@]}" -m vllm.entrypoints.openai.api_server
     --model "$MODEL_DIR"
     --served-model-name "$SERVED_MODEL_NAME"
     --trust-remote-code
     "${DEVICE_ARG[@]}"
     "${QUANT_ARG[@]}"
     "${EAGER_ARG[@]}"
-    --runner pooling
+    "${RUNNER_ARG[@]}"
+    "${CONVERT_ARG[@]}"
+    "${PROMPT_EMBEDS_ARG[@]}"
+    "${MM_EMBEDS_ARG[@]}"
     --host "$HOST"
     --port "$PORT"
     --tensor-parallel-size "$TP"

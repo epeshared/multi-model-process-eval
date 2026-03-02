@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "description": "Scale-test: sweep IMAGE_SIZE for Qwen3-VL image embedding via SGLang.",
+  "template_auto_test_config": "scripts/auto-test/vl-embedding/config_fix_image_size.json",
+  "result_root": "scripts/scale-test/vl-embedding/result/fix_image_size",
+  "run": {
+    "sweep_env_key": "IMAGE_SIZE",
+    "sweep_values": [
+      "224x224",
+      "384x384",
+      "512x512",
+      "1024x1024",
+      "1280x720",
+      "1920x1080"
+    ],
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "repeat_threshold_sec": 1,
+    "warmup_runs": 1,
+    "continue_on_error": true,
+    "cpu": {
+      "cpus": [""]
+    },
+    "sglang_max_total_tokens": [""]
+  },
+  "job_template": {
+    "script": "run_fix_image_size",
+    "backend": "sglang",
+    "device": "cuda",
+    "model": "qwen3-vl-embedding-2b",
+    "model_dir": "/home/ubuntu/models/Qwen/Qwen3-VL-Embedding-2B",
+    "served_model_name": "Qwen3-VL-Embedding-2B",
+    "model_id": "Qwen3-VL-Embedding-2B",
+    "host": "0.0.0.0",
+    "port": 30000,
+    "base_url": "http://127.0.0.1:30000",
+    "max_samples": 256,
+    "batch_size": 8,
+    "dtype": "bfloat16",
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "emon_enable": false,
+    "extra_env": {
+      "SGLANG_ENABLE_MULTIMODAL": "1",
+      "IMAGE_TRANSPORT": "data-url",
+      "WARMUP_SAMPLES": "1",
+      "IMAGE_DIR": "scripts/scale-test/vl-embedding/images"
+    }
+  }
+}

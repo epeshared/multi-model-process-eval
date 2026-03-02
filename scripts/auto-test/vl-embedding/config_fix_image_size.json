@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "description": "Auto-test template for VL image embedding (Qwen3-VL-Embedding) via SGLang HTTP server.",
+  "script_aliases": {
+    "run_fix_image_size": "scripts/vl-embedding/run_fix_image_size.sh"
+  },
+  "defaults": {
+    "cwd": ".",
+    "result_dir": "scripts/auto-test/vl-embedding/result/fix_image_size",
+    "timeout_sec": 21600,
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "servers": {
+    "sglang": {
+      "enabled": true,
+      "start_script": "scripts/embedding/sglang/start_sglang_server_cuda.sh",
+      "cwd": "scripts/embedding/sglang",
+      "args": [],
+      "env": {
+      },
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "BATCH_SIZE": "BATCH_SIZE",
+        "HOST": "HOST",
+        "PORT": "PORT",
+        "SGLANG_PYTHON": "SGLANG_PYTHON",
+        "SGLANG_LIB_IOMP": "SGLANG_LIB_IOMP"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    },
+    "vllm-http": {
+      "enabled": true,
+      "start_script": "scripts/embedding/vllm/start_vllm_server_cuda.sh",
+      "cwd": "scripts/embedding/vllm",
+      "args": [],
+      "env": {
+      },
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "SERVED_MODEL_NAME": "SERVED_MODEL_NAME",
+        "HOST": "HOST",
+        "PORT": "PORT",
+        "BATCH_SIZE": "BATCH_SIZE",
+        "DTYPE": "DTYPE",
+        "DEVICE": "DEVICE",
+        "VLLM_PYTHON": "VLLM_PYTHON",
+        "VLLM_CONDA_ENV": "VLLM_CONDA_ENV"
+      },
+      "ready": {
+        "endpoints": ["POST /v1/embeddings", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    }
+  },
+  "jobs": []
+}
