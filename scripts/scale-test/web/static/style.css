@@ -26,6 +26,11 @@ body {
   padding: 18px;
 }
 
+/* Home page: make main content area ~30% wider */
+body.home-wide main.container {
+  max-width: 1560px;
+}
+
 .topbar {
   position: sticky;
   top: 0;

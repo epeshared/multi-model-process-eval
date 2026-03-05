@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>embedding / fix_token_len / 20260213T012034Z</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container">
+        <div class="brand"><a href="/">Scale Test Results</a></div>
+        <div class="hint">auto-discovered from scripts/scale-test/*/result/**/analysis</div>
+      </div>
+    </header>
+    <main class="container">
+
+<section class="card">
+  <div class="breadcrumbs">
+    <a href="/">Home</a>
+    <span class="sep">/</span>
+    <span class="mono">embedding</span>
+    <span class="sep">/</span>
+    <span class="mono">fix_token_len</span>
+    <span class="sep">/</span>
+    <span class="mono">20260213T012034Z</span>
+  </div>
+
+  <h1>embedding / fix_token_len / 20260213T012034Z</h1>
+    <div class="sub">model: <span class="mono">qwen3-embedding-4b</span></div>
+    <div class="sub">cpu: <span class="mono">Intel(R) Xeon(R) 6983P-C</span></div>
+  <div class="sub">mtime: <span class="mono">2026-02-13 13:43:54</span></div>
+  <div class="sub">run_dir: <span class="mono">/mnt/nvme2n1p1/xtang/multi-model-process-eval/scripts/scale-test/embedding/result/fix_token_len/20260213T012034Z</span></div>
+    <div class="sub">server info: <a href="/server-info/embedding/fix_token_len/20260213T012034Z">View</a></div>
+    <div class="sub">Compare: <a class="btn" href="/compare?a=embedding/fix_token_len/20260213T012034Z">Set as A</a> <a class="btn" href="/compare?b=embedding/fix_token_len/20260213T012034Z">Set as B</a></div>
+</section>
+
+<section class="card">
+    <h2>Summary</h2>
+    <div class="embed"><div class="sub">Scale Test 总结（可直接放 PPT）：按四个 *_scaling.csv 给出总体影响与建议</div>
+
+<h3>总体结论（影响强度排序）</h3>
+
+<div class="sub">说明：以各维度在固定其它条件下的组内 TPS/throughput 波动（median max/min）衡量影响强度；CPU 另用 speedup/efficiency 描述。</div>
+
+<ul><li><span class="mono">token_len</span>：median(max/min)=<b>23.41×</b></li><li><span class="mono">batch_size</span>：median(max/min)=<b>1.37×</b></li><li><span class="mono">kv_cap</span>：<span class="muted">N/A（未 sweep 或有效点不足）</span></li></ul>
+
+<h3>TPS pivot（行=batch_size，列=token_len）</h3><div class="sub">统计口径：对同一 token_len×batch_size 的 TPS 做 mean（必要时先选取最常见 slice）。</div><div class="table-scroll"><table class="table small"><thead><tr><th>batch_size</th><th class="mono">tok10</th><th class="mono">tok20</th><th class="mono">tok50</th><th class="mono">tok100</th></tr></thead><tbody><tr><td class="mono">bs=50.000</td><td class="mono">81.068</td><td class="mono">75.129</td><td class="mono">1.867</td><td class="mono">0.893</td></tr><tr><td class="mono">bs=100.000</td><td class="mono">118.689</td><td class="mono">107.962</td><td class="mono">1.966</td><td class="mono">0.923</td></tr><tr><td class="mono">bs=200.000</td><td class="mono">126.570</td><td class="mono">144.605</td><td class="mono">2.215</td><td class="mono">1.055</td></tr></tbody></table></div>
+
+<h3>token_len_scaling.csv</h3><ul><li><b>一句话结论</b>：token_len 改变会显著影响单位时间可处理的 token 数；通常 token_len 越大 tokens/sec 越低。</li><li><b>总体影响等级</b>：<span class="pill strong">高</span>（以组内 max/min 作为影响强度衡量）</li><li><b>统计口径</b>：基于 token_len_scaling.csv（mean across repeats），rows=12, groups=3（按 cpu_count,kv_cap,batch_size 分组）</li><li><b>中位最优点</b>：token_len≈<b>20</b>（argmax tokens_per_sec）</li><li><b>影响幅度</b>：组内 tokens_per_sec 的 median(max/min)=<b>23.41×</b>（p90 26.61×）</li><li><b>趋势</b>：median corr(token_len, tokens_per_sec)=<b>-0.74</b></li><li><b>建议</b>：在固定 cpu/kv/bs 下，token_len 增大时 tokens/sec 往往下降；建议对齐目标场景的 token_len 做对比，避免用单一 token_len 代表所有场景。</li></ul>
+
+<h3>batch_size_scaling.csv</h3><ul><li><b>一句话结论</b>：批量大小主要影响吞吐上限；本次 sweep 中整体影响较小。</li><li><b>总体影响等级</b>：<span class="pill ok">低</span>（以组内 max/min 作为影响强度衡量）</li><li><b>统计口径</b>：基于 batch_size_scaling.csv（mean across repeats），rows=12, groups=4（按 cpu_count,kv_cap,token_len 分组）</li><li><b>中位最优点</b>：batch_size≈<b>200</b>（argmax tps）</li><li><b>影响幅度</b>：组内 tps 的 median(max/min)=<b>1.37×</b>（p90 1.82×）</li><li><b>建议</b>：建议优先选择 batch_size≈200（按当前 sweep 的中位最优点）。</li></ul>
+
+<h3>cpu_scaling.csv</h3><ul><li><b>一句话结论</b>：CPU 核数增加能提升吞吐，但总体呈次线性；需要关注并行效率。</li><li><b>统计口径</b>：基于 cpu_scaling.csv（mean across repeats），rows=0, groups=0</li></ul>
+
+<h3>kv_scaling.csv</h3><div class="muted">No non-empty rows.</div></div>
+</section>
+
+<section class="card">
+  <h2>CSVs</h2>
+    <div class="sub">Embedded table: <span class="mono">token_len_scaling.csv</span> (same row-set as <span class="mono">batch_size_scaling.csv</span>/<span class="mono">cpu_scaling.csv</span>/<span class="mono">kv_scaling.csv</span>; only sorted differently) • <a href="/csv/embedding/fix_token_len/20260213T012034Z/token_len_scaling.csv">Full preview</a> • <a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/token_len_scaling.csv" target="_blank">Download</a></div><div class="sub">Preview: <span class="mono">token_len_scaling.csv</span> (first 12 rows)</div><div class="table-scroll preview-scroll"><table class="table small preview-table"><thead><tr><th class="">resource_cpu</th><th class="">cpu_count</th><th class="">kv_cap</th><th class="">sglang_max_total_tokens</th><th class="">batch_size</th><th class="">token_len</th><th class="">tps</th><th class="">tps_per_cpu</th><th class="">tokens_per_sec</th><th class="">tokens_per_sec_per_cpu</th><th class="">avg_batch_time_sec</th></tr></thead><tbody><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">50</td><td class="mono">10</td><td class="mono">81.06848952015417</td><td class="mono">10.133561190019272</td><td class="mono">810.6848952015417</td><td class="mono">101.33561190019272</td><td class="mono">0.6167624473571778</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">50</td><td class="mono">20</td><td class="mono">75.12871083675854</td><td class="mono">9.391088854594818</td><td class="mono">1502.574216735171</td><td class="mono">187.82177709189637</td><td class="mono">0.6655245304107666</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">50</td><td class="mono">50</td><td class="mono">1.8665033180777328</td><td class="mono">0.2333129147597165</td><td class="mono">93.32516590388664</td><td class="mono">11.66564573798583</td><td class="mono">26.78805845975876</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">50</td><td class="mono">100</td><td class="mono">0.8929041999350228</td><td class="mono">0.1116130249918778</td><td class="mono">89.29041999350228</td><td class="mono">11.161302499187785</td><td class="mono">55.99704873561859</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">100</td><td class="mono">10</td><td class="mono">118.68880057077422</td><td class="mono">14.836100071346776</td><td class="mono">1186.8880057077422</td><td class="mono">148.36100071346777</td><td class="mono">0.8425394773483277</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">100</td><td class="mono">20</td><td class="mono">107.96174858380616</td><td class="mono">13.495218572975771</td><td class="mono">2159.234971676123</td><td class="mono">269.9043714595154</td><td class="mono">0.9262539863586424</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">100</td><td class="mono">50</td><td class="mono">1.9659470574379287</td><td class="mono">0.2457433821797411</td><td class="mono">98.29735287189644</td><td class="mono">12.287169108987054</td><td class="mono">50.86606967449188</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">100</td><td class="mono">100</td><td class="mono">0.9225172898194708</td><td class="mono">0.1153146612274338</td><td class="mono">92.25172898194708</td><td class="mono">11.531466122743385</td><td class="mono">108.39905235767364</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">200</td><td class="mono">10</td><td class="mono">126.57012988823588</td><td class="mono">15.821266236029484</td><td class="mono">1265.7012988823587</td><td class="mono">158.21266236029484</td><td class="mono">1.580151653289795</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">200</td><td class="mono">20</td><td class="mono">144.60549745839955</td><td class="mono">18.075687182299944</td><td class="mono">2892.109949167991</td><td class="mono">361.5137436459989</td><td class="mono">1.3830732822418212</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">200</td><td class="mono">50</td><td class="mono">2.2150028128127173</td><td class="mono">0.2768753516015896</td><td class="mono">110.75014064063586</td><td class="mono">13.843767580079483</td><td class="mono">90.29333906173706</td></tr><tr><td class="mono">0,2,4,6,8,10,12,14</td><td class="mono">8</td><td class=""></td><td class=""></td><td class="mono">200</td><td class="mono">100</td><td class="mono">1.0551253644020064</td><td class="mono">0.1318906705502508</td><td class="mono">105.51253644020065</td><td class="mono">13.189067055025081</td><td class="mono">189.5509356021881</td></tr></tbody></table></div>
+  <table class="table">
+    <thead><tr><th>file</th><th>preview</th><th>download</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">batch_size_scaling.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/batch_size_scaling.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/batch_size_scaling.csv" target="_blank">Download</a></td></tr><tr><td class="mono">cpu_scaling.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/cpu_scaling.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/cpu_scaling.csv" target="_blank">Download</a></td></tr><tr><td class="mono">emon_socket_metrics.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/emon_socket_metrics.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/emon_socket_metrics.csv" target="_blank">Download</a></td></tr><tr><td class="mono">failed_variants.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/failed_variants.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/failed_variants.csv" target="_blank">Download</a></td></tr><tr><td class="mono">kv_scaling.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/kv_scaling.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/kv_scaling.csv" target="_blank">Download</a></td></tr><tr><td class="mono">summary_pivot.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/summary_pivot.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/summary_pivot.csv" target="_blank">Download</a></td></tr><tr><td class="mono">token_len_scaling.csv</td><td><a href="/csv/embedding/fix_token_len/20260213T012034Z/token_len_scaling.csv">Preview</a></td><td><a href="/raw/embedding/fix_token_len/20260213T012034Z/analysis/token_len_scaling.csv" target="_blank">Download</a></td></tr>
+    </tbody>
+  </table>
+</section>
+
+    </main>
+    <footer class="footer">
+      <div class="container">Generated by scripts/scale-test/web/server.py</div>
+    </footer>
+  </body>
+</html>

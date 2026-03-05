@@ -166,6 +166,49 @@ def _list_analysis_files(analysis_dir: Path) -> Tuple[List[Path], List[Path]]:
     return pngs, csvs
 
 
+def _analysis_has_emon(analysis_dir: Path) -> bool:
+    """Return True if analysis_dir contains *usable* EMon socket metrics.
+
+    We treat empty files / header-only CSVs as "no EMon" to avoid false positives.
+    """
+
+    try:
+        csv_path = (analysis_dir / "emon_socket_metrics.csv").resolve()
+        if not (_is_within(csv_path, analysis_dir) and csv_path.exists() and csv_path.is_file()):
+            return False
+
+        # Quick reject: empty / near-empty file.
+        if csv_path.stat().st_size < 32:
+            return False
+
+        with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            metric_cols = [
+                c
+                for c in fieldnames
+                if c.startswith("socket_0__metric_")
+                or c.startswith("socket_1__metric_")
+                or c.startswith("socket_2__metric_")
+                or c.startswith("socket_3__metric_")
+            ]
+            if not metric_cols:
+                return False
+
+            # Look for at least one row with any non-empty metric.
+            for i, row in enumerate(reader):
+                if i > 200:
+                    break
+                for c in metric_cols:
+                    v = str(row.get(c, "")).strip()
+                    if v and v.lower() not in {"nan", "none"}:
+                        return True
+
+        return False
+    except Exception:
+        return False
+
+
 def _extract_run_meta(run: RunInfo) -> Dict[str, str]:
     """Best-effort extract run metadata for display/filter.
 
@@ -1212,8 +1255,10 @@ def _parse_cpu_expr(cpu_expr: str) -> Optional[int]:
     return None
 
 
-def _html_page(title: str, body: str) -> str:
+def _html_page(title: str, body: str, *, body_class: str = "") -> str:
     css_href = "/static/style.css"
+    body_cls = (body_class or "").strip()
+    body_attr = f' class="{_e(body_cls)}"' if body_cls else ""
     return (
         "<!doctype html>\n"
         "<html>\n"
@@ -1223,7 +1268,7 @@ def _html_page(title: str, body: str) -> str:
         f"    <title>{_e(title)}</title>\n"
         f'    <link rel="stylesheet" href="{css_href}" />\n'
         "  </head>\n"
-        "  <body>\n"
+        f"  <body{body_attr}>\n"
         "    <header class=\"topbar\">\n"
         "      <div class=\"container\">\n"
         "        <div class=\"brand\"><a href=\"/\">Scale Test Results</a></div>\n"
@@ -1293,6 +1338,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
         model = meta.get("model") or "-"
         cpu = meta.get("cpu") or "-"
         memory = meta.get("memory") or "-"
+        has_emon = _analysis_has_emon(r.analysis_dir)
         href = f"/run/{_e(r.ref.task)}/{_e(r.ref.suite)}/{_e(r.ref.run_id)}"
         run_key = f"{r.ref.task}/{r.ref.suite}/{r.ref.run_id}"
         rows.append(
@@ -1304,6 +1350,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
             f"<td class=\"mono\">{_e(model)}</td>"
             f"<td class=\"mono\">{_e(cpu)}</td>"
             f"<td class=\"mono\">{_e(memory)}</td>"
+            f"<td class=\"mono\">{'yes' if has_emon else '-'}</td>"
             f"<td class=\"mono\">{_e(_fmt_dt(r.mtime))}</td>"
             "</tr>"
         )
@@ -1389,11 +1436,12 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
                     <th>model</th>
                     <th>cpu</th>
                     <th>memory</th>
+                    <th>emon</th>
                     <th>mtime</th>
                 </tr>
             </thead>
             <tbody>
-                {''.join(rows) if rows else '<tr><td colspan="8" class="muted">No runs found.</td></tr>'}
+                {''.join(rows) if rows else '<tr><td colspan="9" class="muted">No runs found.</td></tr>'}
             </tbody>
         </table>
         <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -1409,7 +1457,7 @@ def _render_home(scale_test_root: Path, runs: List[RunInfo], q: Dict[str, List[s
     </form>
 </section>
 """
-    return _html_page("Scale Test Results", body)
+    return _html_page("Scale Test Results", body, body_class="home-wide")
 
 
 def _pick_lines(text: str, *, keep_prefixes: Iterable[str], max_lines: int = 32) -> str:

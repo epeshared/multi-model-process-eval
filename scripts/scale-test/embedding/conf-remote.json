@@ -15,26 +15,20 @@
       100,
       200
     ],
-    "repeats": 1,
-    "warmup_runs": 2,
-    "cpu": {
-      "cpus": [
-        "0-7",
-        "0-15",
-        "0-31"
-      ]
-    },
-    "sglang_max_total_tokens": [
-      "120000",
-      "250000",
-      "500000"
-    ],
-    "continue_on_error": true,
+    "repeat_threshold_sec": 1,
+    "warmup_runs": 1,
+    "continue_on_error": true,  
     "servers": [
       {
-        "ip": "172.16.116.49",
-        "username": "root",
-        "password": "",
+        "ip": "82.157.169.128",
+        "username": "ubuntu",
+        "password": null,
+        "ssh_options": [
+          "ProxyCommand=nc -x proxy-shz.intel.com:1080 -X 5 %h %p",
+          "ConnectTimeout=10",
+          "ServerAliveInterval=30",
+          "ServerAliveCountMax=3"
+        ],
         "conda_env": "sglang-cpu",
         "install_requirements": true,
         "requirements_files": [
@@ -43,6 +37,11 @@
           "requirements.txt"
         ],
         "pre_requirements": [
+          {
+            "file": "scripts/scale-test/pre-requirements/install_miniforge3_linux_x86_64.sh",
+            "stage": "before_conda",
+            "mode": "bash"
+          },
           {
             "file": "scripts/scale-test/pre-requirements/install_sglang_system_deps.sh",
             "stage": "before_conda",
@@ -62,12 +61,17 @@
             "file": "scripts/scale-test/pre-requirements/install_sglang.sh",
             "stage": "after_conda",
             "mode": "bash"
-          }
+          },
+          {
+            "file": "scripts/scale-test/pre-requirements/download-models.sh",
+            "stage": "after_conda",
+            "mode": "bash"
+          }          
         ]
       }
     ],
-    "remote_repo_dir": "/home/xtang/multi-model-process-eval",
-    "remote_result_root": "/home/xtang/mmpe-scale-test/embedding/result/fix_token_len",
+    "remote_repo_dir": "/home/ubuntu/multi-model-process-eval",
+    "remote_result_root": "/home/ubuntu/mmpe-scale-test/embedding/result/fix_token_len",
     "remote_python": "",
     "install_requirements": false,
     "requirements_profile": "cpu",
@@ -84,10 +88,10 @@
   },
   "job_template": {
     "backend": "sglang",
-    "model": "qwen3-embedding-4b",
-    "model_dir": "/home/xtang/models/Qwen/Qwen3-Embedding-4B",
-    "served_model_name": "Qwen3-Embedding-4B",
-    "model_id": "Qwen3-Embedding-4B",
+    "model": "qwen3-embedding-0.6b",
+    "model_dir": "/home/ubuntu/models/Qwen/Qwen3-Embedding-0.6B",
+    "served_model_name": "Qwen3-Embedding-0.6B",
+    "model_id": "Qwen3-Embedding-0.6B",
     "host": "0.0.0.0",
     "port": 30000,
     "base_url": "http://127.0.0.1:30000",
@@ -99,11 +103,11 @@
     "stop_server_after_job": true,
     "emon_enable": false,
     "extra_env": {
-      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python"
+      "SGLANG_PYTHON": "/home/ubuntu/miniforge3/envs/sglang-cpu/bin/python"
     }
   },
   "emon": {
-    "process_after_run": true,
+    "process_after_run": false,
     "process_cmd": [
       "emon",
       "-process-pyedp",
