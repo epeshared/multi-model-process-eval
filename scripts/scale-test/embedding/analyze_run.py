@@ -50,6 +50,37 @@ DEFAULT_SOCKET_VIEW_METRICS = [
 ]
 
 
+# A small curated set of high-signal aggregated metrics from EMON summary.xlsx
+# "system view". This is intended to be human-friendly (one row per job) and
+# complements emon_socket_metrics.csv (socket view).
+DEFAULT_SYSTEM_VIEW_METRICS = [
+    # Memory bandwidth
+    "metric_memory bandwidth read (MB/sec)",
+    "metric_memory bandwidth write (MB/sec)",
+    "metric_memory bandwidth total (MB/sec)",
+    # Topdown / TMA (system-view aggregated)
+    # Keep a small but useful set: top-level breakdown + a couple of key sub-areas.
+    "metric_TMA_Frontend_Bound(%)",
+    "metric_TMA_Bad_Speculation(%)",
+    "metric_TMA_Retiring(%)",
+    "metric_TMA_Backend_Bound(%)",
+    "metric_TMA_..Core_Bound(%)",
+    "metric_TMA_..Memory_Bound(%)",
+    "metric_TMA_....L1_Bound(%)",
+    "metric_TMA_....L2_Bound(%)",
+    "metric_TMA_....L3_Bound(%)",
+    "metric_TMA_....DRAM_Bound(%)",
+    "metric_TMA_....Store_Bound(%)",
+    # Cache miss intensity
+    "metric_L2 MPI (includes code+data+rfo w/ prefetches)",
+    "metric_LLC MPI (includes code+data+rfo w/ prefetches)",
+    # NUMA
+    "metric_NUMA % all reads to remote socket memory",
+    "metric_NUMA %_Reads addressed to local DRAM",
+    "metric_NUMA %_Reads addressed to remote DRAM",
+]
+
+
 def _eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
@@ -739,6 +770,56 @@ def _extract_socket_view_from_xlsx(
     return out
 
 
+def _extract_system_view_from_xlsx(
+    *,
+    pd: Any,
+    xlsx_path: str,
+    wanted_metrics: List[str],
+) -> Dict[str, Any]:
+    """Return a flattened dict of system-view *aggregated* metrics.
+
+    Output columns use the original metric names (e.g.
+    "metric_memory bandwidth total (MB/sec)").
+    """
+
+    p = Path(str(xlsx_path)).expanduser()
+    if not p.exists():
+        return {}
+    try:
+        df_sv = pd.read_excel(str(p), sheet_name="system view")
+    except Exception:
+        return {}
+
+    if df_sv is None or getattr(df_sv, "empty", True):
+        return {}
+
+    cols = [str(c).strip() for c in list(df_sv.columns)]
+    if len(cols) < 2:
+        return {}
+
+    df_sv.columns = cols
+    metric_col = cols[0]
+    agg_col = next((c for c in cols if c.strip().lower() == "aggregated"), None)
+    if not agg_col:
+        # Fallback: second column (older files may not label as aggregated)
+        agg_col = cols[1]
+
+    tmp = df_sv[[metric_col, agg_col]].copy()
+    tmp[metric_col] = tmp[metric_col].astype(str).str.strip()
+    tmp = tmp[tmp[metric_col].str.len() > 0]
+
+    by_name = {str(n).strip().lower(): row for n, row in tmp.set_index(metric_col).iterrows()}
+
+    out: Dict[str, Any] = {}
+    for m in wanted_metrics:
+        key = str(m).strip()
+        row = by_name.get(key.lower())
+        if row is None:
+            continue
+        out[key] = row.get(agg_col)
+    return out
+
+
 def _fmt_point_value(v: Any) -> str:
     try:
         x = float(v)
@@ -996,8 +1077,15 @@ def main() -> int:
     socket_metrics = list(args.socket_metrics) if args.socket_metrics else list(DEFAULT_SOCKET_VIEW_METRICS)
     socket_rows: List[Dict[str, Any]] = []
 
+    # ------------------------------------------------------------------
+    # 3b) emon_xlsx_metrics.csv (system view, aggregated)
+    # ------------------------------------------------------------------
+    system_metrics = list(DEFAULT_SYSTEM_VIEW_METRICS)
+    system_rows: List[Dict[str, Any]] = []
+
     if "emon_summary_xlsx" in df_jobs.columns and not df_jobs.empty:
-        cache: Dict[str, Dict[str, Any]] = {}
+        cache_socket: Dict[str, Dict[str, Any]] = {}
+        cache_system: Dict[str, Dict[str, Any]] = {}
         for _, r in df_jobs.iterrows():
             xlsx_raw = r.get("emon_summary_xlsx")
             try:
@@ -1013,9 +1101,12 @@ def main() -> int:
                     continue
             except Exception:
                 continue
-            if xlsx not in cache:
-                cache[xlsx] = _extract_socket_view_from_xlsx(pd=pd, xlsx_path=xlsx, wanted_metrics=socket_metrics)
-            rec: Dict[str, Any] = {
+            if xlsx not in cache_socket:
+                cache_socket[xlsx] = _extract_socket_view_from_xlsx(pd=pd, xlsx_path=xlsx, wanted_metrics=socket_metrics)
+            if xlsx not in cache_system:
+                cache_system[xlsx] = _extract_system_view_from_xlsx(pd=pd, xlsx_path=xlsx, wanted_metrics=system_metrics)
+
+            base_rec: Dict[str, Any] = {
                 "server_host": r.get("server_host", ""),
                 "variant": r.get("variant", ""),
                 "job_name": r.get("job_name", ""),
@@ -1026,14 +1117,26 @@ def main() -> int:
                 "token_len": r.get("token_len", ""),
                 "emon_summary_xlsx": xlsx,
             }
-            rec.update(cache.get(xlsx, {}))
-            socket_rows.append(rec)
+
+            rec_socket = dict(base_rec)
+            rec_socket.update(cache_socket.get(xlsx, {}))
+            socket_rows.append(rec_socket)
+
+            rec_sys = dict(base_rec)
+            rec_sys.update(cache_system.get(xlsx, {}))
+            system_rows.append(rec_sys)
 
     if socket_rows:
         df_socket = pd.DataFrame(socket_rows)
         _write_csv(df_socket, out_dir / "emon_socket_metrics.csv")
     else:
         pd.DataFrame([]).to_csv(out_dir / "emon_socket_metrics.csv", index=False)
+
+    if system_rows:
+        df_sys = pd.DataFrame(system_rows)
+        _write_csv(df_sys, out_dir / "emon_xlsx_metrics.csv")
+    else:
+        pd.DataFrame([]).to_csv(out_dir / "emon_xlsx_metrics.csv", index=False)
 
     # ------------------------------------------------------------------
     # 3c) EMON socket TMA pie charts + per-run HTML summary

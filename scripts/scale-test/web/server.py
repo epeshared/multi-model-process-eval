@@ -1230,6 +1230,417 @@ def _render_emon_memory_bandwidth_key_plot(csv_path: Path) -> str:
     return f'<div>{legend}<div class="plots">{"".join(cards)}</div></div>'
 
 
+def _render_emon_xlsx_metrics_key_plots(csv_path: Path) -> str:
+    """Render key plots for emon_xlsx_metrics.csv.
+
+    For each (cpu, kv) configuration:
+    - x-axis: batch_size
+    - series: token_len
+    - y-axis: selected EMON metrics from summary.xlsx system view
+    """
+
+    text = _read_text(csv_path, max_bytes=20_000_000)
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return '<div class="muted">Empty CSV.</div>'
+
+    cols = list(reader.fieldnames)
+    if "batch_size" not in cols:
+        return '<div class="muted">Missing required column: <span class="mono">batch_size</span>.</div>'
+
+    # Prefer the most common columns used by analyze_run.py
+    token_col = "token_len" if "token_len" in cols else ""
+
+    # Metric columns (must exist in the CSV)
+    # Keep this list focused (high-signal) to avoid overly long pages.
+    metric_defs: List[Tuple[str, str, str]] = [
+        ("BW_total_MBps", "metric_memory bandwidth total (MB/sec)", "MB/sec"),
+        # TMA (Topdown) top-level
+        ("TMA_Frontend_Bound_pct", "metric_TMA_Frontend_Bound(%)", "%"),
+        ("TMA_Bad_Speculation_pct", "metric_TMA_Bad_Speculation(%)", "%"),
+        ("TMA_Retiring_pct", "metric_TMA_Retiring(%)", "%"),
+        ("TMA_Backend_Bound_pct", "metric_TMA_Backend_Bound(%)", "%"),
+        # TMA key mid-level
+        ("TMA_Core_Bound_pct", "metric_TMA_..Core_Bound(%)", "%"),
+        ("TMA_Memory_Bound_pct", "metric_TMA_..Memory_Bound(%)", "%"),
+        # TMA memory-bound breakdown (deeper sub-levels)
+        ("TMA_L1_Bound_pct", "metric_TMA_....L1_Bound(%)", "%"),
+        ("TMA_L2_Bound_pct", "metric_TMA_....L2_Bound(%)", "%"),
+        ("TMA_L3_Bound_pct", "metric_TMA_....L3_Bound(%)", "%"),
+        ("DRAM_Bound_pct", "metric_TMA_....DRAM_Bound(%)", "%"),
+        ("TMA_Store_Bound_pct", "metric_TMA_....Store_Bound(%)", "%"),
+        # Cache miss intensity
+        ("LLC_MPI", "metric_LLC MPI (includes code+data+rfo w/ prefetches)", "MPI"),
+    ]
+    available = [m for m in metric_defs if m[1] in cols]
+    if not available:
+        want = ", ".join(_e(m[1]) for m in metric_defs)
+        return f'<div class="muted">No known metric columns found. Expected one of: <span class="mono">{want}</span>.</div>'
+
+    def _norm(v: Any) -> str:
+        f = _try_float(v)
+        if f is None:
+            return str(v or "").strip()
+        if abs(f - int(f)) < 1e-9:
+            return str(int(f))
+        return f"{f:g}"
+
+    def _median(vals: List[float]) -> Optional[float]:
+        if not vals:
+            return None
+        s = sorted(vals)
+        n = len(s)
+        m = n // 2
+        if n % 2 == 1:
+            return s[m]
+        return (s[m - 1] + s[m]) / 2.0
+
+    def _tok_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    def _cpu_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    def _kv_sort_key(k: str) -> Tuple[int, float, str]:
+        f = _try_float(k)
+        if f is None:
+            return (1, 0.0, k)
+        return (0, float(f), k)
+
+    # grouped: cpu -> kv -> metric_key -> token_len -> batch_size -> [values]
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, Dict[float, List[float]]]]]] = {}
+    row_count = 0
+    for r in reader:
+        row_count += 1
+        bs = _try_float((r.get("batch_size", "") or "").strip())
+        if bs is None:
+            continue
+        tok = _norm(r.get(token_col, "")) if token_col else "all"
+
+        cpu_key = "-"
+        for ck in ["resource_cpu_count", "cpu_count", "resource_cpu"]:
+            if ck in cols:
+                vv = (r.get(ck, "") or "").strip()
+                if vv:
+                    cpu_key = _norm(vv)
+                    break
+
+        kv_key = "-"
+        for kk in ["kv_cap", "sglang_max_total_tokens"]:
+            if kk in cols:
+                vv = (r.get(kk, "") or "").strip()
+                if vv:
+                    kv_key = _norm(vv)
+                    break
+
+        for metric_key, col_name, _unit in available:
+            v = _try_float((r.get(col_name, "") or "").strip())
+            if v is None:
+                continue
+            grouped.setdefault(cpu_key, {}).setdefault(kv_key, {}).setdefault(metric_key, {}).setdefault(tok, {}).setdefault(float(bs), []).append(float(v))
+
+    if not grouped:
+        return '<div class="muted">No valid rows for plotting.</div>'
+
+    def _try_import_matplotlib_pyplot() -> Any:
+        try:
+            import matplotlib  # type: ignore
+
+            matplotlib.use("Agg", force=True)  # type: ignore[attr-defined]
+            import matplotlib.pyplot as plt  # type: ignore
+
+            return plt
+        except Exception:
+            return None
+
+    plt = _try_import_matplotlib_pyplot()
+    if plt is not None:
+        import base64
+        import io as _io
+        import math
+
+        def _fmt_point_value(metric_key: str, v: Any) -> str:
+            try:
+                x = float(v)
+            except Exception:
+                return str(v)
+            if math.isnan(x) or math.isinf(x):
+                return ""
+            if metric_key.endswith("_pct"):
+                return f"{x:.2f}"
+            if metric_key.endswith("MPI"):
+                # show compact but stable
+                if abs(x) >= 1:
+                    return f"{x:.3f}"
+                return f"{x:.4f}"
+            # bandwidth
+            if abs(x) >= 10000:
+                return f"{x:.0f}"
+            if abs(x) >= 1000:
+                return f"{x:.1f}"
+            if abs(x) >= 100:
+                return f"{x:.2f}"
+            return f"{x:.3f}"
+
+        cpu_vals = sorted(grouped.keys(), key=_cpu_sort_key) or ["-"]
+        kv_vals = sorted({kv for cpu in grouped.values() for kv in cpu.keys()}, key=_kv_sort_key) or ["-"]
+
+        cards: List[str] = []
+        cfg_charts = 0
+        for cpu in cpu_vals:
+            nrows = len(available)
+            ncols = len(kv_vals)
+            fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 3.6 * nrows), squeeze=False)
+            any_ax = False
+
+            for mi, (metric_key, col_name, unit) in enumerate(available):
+                for kj, kv in enumerate(kv_vals):
+                    ax = axes[mi][kj]
+                    by_tok = grouped.get(cpu, {}).get(kv, {}).get(metric_key, {})
+                    if not by_tok:
+                        ax.set_axis_off()
+                        continue
+                    any_ax = True
+                    cfg_charts += 1
+                    for line_idx, tok in enumerate(sorted(by_tok.keys(), key=_tok_sort_key)[:10]):
+                        by_bs = by_tok.get(tok, {})
+                        pts: List[Tuple[float, float]] = []
+                        for bs in sorted(by_bs.keys()):
+                            med = _median(by_bs.get(bs, []))
+                            if med is None:
+                                continue
+                            pts.append((bs, med))
+                        if not pts:
+                            continue
+
+                        xs = [p[0] for p in pts]
+                        ys = [p[1] for p in pts]
+                        ax.plot(xs, ys, marker="o", linewidth=1.8, label=f"token_len={tok}" if token_col else f"tok={tok}")
+
+                        for px, py in zip(xs, ys):
+                            s = _fmt_point_value(metric_key, py)
+                            if not s:
+                                continue
+                            ax.annotate(
+                                s,
+                                (px, py),
+                                textcoords="offset points",
+                                xytext=(0, 6 + 8 * (line_idx % 3)),
+                                ha="center",
+                                va="bottom",
+                                fontsize=7,
+                                alpha=0.9,
+                            )
+
+                    ax.set_title(f"{metric_key} | kv={kv}")
+                    ax.set_xlabel("batch_size")
+                    ax.set_ylabel(f"{col_name} ({unit})")
+                    ax.grid(True, alpha=0.25)
+                    ax.legend(fontsize=8)
+
+            if not any_ax:
+                plt.close(fig)
+                continue
+
+            fig.suptitle(f"EMon XLSX Metrics · cpu={cpu}", y=1.02, fontsize=12)
+            fig.tight_layout()
+            buf = _io.BytesIO()
+            fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+            plt.close(fig)
+            png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            png_uri = f"data:image/png;base64,{png_b64}"
+
+            fname = f"plot_emon_xlsx_metrics_cpu_{cpu}.png"
+            img = f'<a href="{png_uri}" target="_blank"><img src="{png_uri}" alt="{_e(fname)}" /></a>'
+            cards.append(
+                '<div class="plots"><div class="plot">'
+                f'<div class="plot-title">{_e(fname)}</div>'
+                f'<div class="sub">cpu={_e(cpu)} · kv={_e(",".join(kv_vals))} · series=token_len</div>'
+                f'{img}'
+                '</div></div>'
+            )
+
+        if not cards:
+            return '<div class="muted">No plottable points found.</div>'
+
+        legend = (
+            '<div class="sub">Key plots: x=<span class="mono">batch_size</span>, series=<span class="mono">token_len</span>, grouped by <span class="mono">cpu</span> and <span class="mono">kv</span>.</div>'
+            f'<div class="sub">rows={_e(row_count)} · metrics={_e(len(available))} · charts={_e(cfg_charts)}</div>'
+        )
+        return f'<div>{legend}{"".join(cards)}</div>'
+
+    # SVG fallback (no matplotlib dependency)
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+    def _fmt_y(metric_key: str, y: float, *, use_g: bool) -> str:
+        if metric_key == "BW_total_MBps":
+            if use_g:
+                return f"{(y / 1000.0):.2f}G"
+            return f"{y:.2f}"
+        if metric_key.endswith("_pct"):
+            return f"{y:.2f}%"
+        if metric_key.endswith("MPI"):
+            if abs(y) >= 1:
+                return f"{y:.3f}"
+            return f"{y:.4f}"
+        return f"{y:.4g}"
+
+    def _render_series_svg(
+        *,
+        series: List[Tuple[str, List[Tuple[float, float, int]], str]],
+        title: str,
+        file_tag: str,
+        y_axis_label: str,
+        use_g: bool,
+        metric_key: str,
+    ) -> str:
+        # Use categorical x positions so each point maps exactly to its batch_size tick.
+        all_bs = sorted({p[0] for _, pts, _ in series for p in pts})
+        if not all_bs:
+            return '<div class="muted">No points.</div>'
+
+        x_idx = {x: i for i, x in enumerate(all_bs)}
+        all_y = [p[1] for _, pts, _ in series for p in pts]
+        y_min, y_max = min(all_y), max(all_y)
+        if y_min == y_max:
+            pad = max(1e-9, abs(y_min) * 0.1)
+            y_min -= pad
+            y_max += pad
+
+        width = 1100
+        height = 380
+        ml, mr, mt, mb = 70, 20, 20, 64
+        pw = max(1, width - ml - mr)
+        ph = max(1, height - mt - mb)
+        x_pad = min(48.0, pw * 0.08)
+
+        def sx(bs: float) -> float:
+            if len(all_bs) == 1:
+                return ml + pw / 2.0
+            idx = x_idx.get(bs, 0)
+            return ml + x_pad + idx * (pw - 2.0 * x_pad) / (len(all_bs) - 1)
+
+        def sy(y: float) -> float:
+            return mt + (y_max - y) * ph / (y_max - y_min)
+
+        grid: List[str] = []
+        yticks = 5
+        for i in range(yticks + 1):
+            ty = mt + ph * i / yticks
+            yv = y_max - (y_max - y_min) * i / yticks
+            grid.append(
+                f'<line x1="{ml}" y1="{ty:.2f}" x2="{ml + pw}" y2="{ty:.2f}" stroke="var(--border)" stroke-width="1" opacity="0.65" />'
+            )
+            grid.append(
+                f'<text x="{ml - 8}" y="{ty + 4:.2f}" fill="var(--muted)" font-size="11" text-anchor="end">{_e(_fmt_y(metric_key, float(yv), use_g=use_g))}</text>'
+            )
+
+        for bs in all_bs:
+            tx = sx(bs)
+            grid.append(
+                f'<line x1="{tx:.2f}" y1="{mt}" x2="{tx:.2f}" y2="{mt + ph}" stroke="var(--border)" stroke-width="1" opacity="0.45" />'
+            )
+            grid.append(
+                f'<text x="{tx:.2f}" y="{height - 10}" fill="var(--muted)" font-size="11" text-anchor="middle">{_e(f"{bs:g}")}</text>'
+            )
+
+        axis = (
+            f'<line x1="{ml}" y1="{mt + ph}" x2="{ml + pw}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+            f'<line x1="{ml}" y1="{mt}" x2="{ml}" y2="{mt + ph}" stroke="var(--text)" stroke-width="1.2" />'
+        )
+
+        lines: List[str] = []
+        legends: List[str] = []
+        for idx, (name, pts, color) in enumerate(series):
+            sorted_pts = sorted(pts, key=lambda t: t[0])
+            poly = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for x, y, _ in sorted_pts)
+            lines.append(f'<polyline fill="none" stroke="{color}" stroke-width="2.2" points="{poly}" />')
+            for x, y, n in sorted_pts:
+                lines.append(
+                    f'<circle cx="{sx(x):.2f}" cy="{sy(y):.2f}" r="3.3" fill="{color}" fill-opacity="0.92">'
+                    f'<title>{name} | batch_size={x:.6g}, value={y:.6g}, n={n}</title></circle>'
+                )
+                lines.append(
+                    f'<text x="{sx(x):.2f}" y="{sy(y) - 7:.2f}" fill="var(--text)" font-size="10" text-anchor="middle">{_e(_fmt_y(metric_key, float(y), use_g=use_g))}</text>'
+                )
+            lx = ml + 12 + (idx % 5) * 190
+            ly = mt + 14 + (idx // 5) * 14
+            legends.append(f'<text x="{lx:.2f}" y="{ly:.2f}" fill="{color}" font-size="11">● { _e(name) }</text>')
+
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="auto" role="img" aria-label="{_e(title)}">'
+            f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff" />'
+            f'{"".join(grid)}{axis}{"".join(lines)}{"".join(legends)}'
+            f'<text x="{ml + pw / 2:.2f}" y="{height - 30}" fill="#111111" font-size="12" text-anchor="middle">batch_size</text>'
+            f'<text x="16" y="{mt + ph / 2:.2f}" fill="#111111" font-size="12" text-anchor="middle" transform="rotate(-90,16,{mt + ph / 2:.2f})">{_e(y_axis_label)}</text>'
+            '</svg>'
+        )
+        svg_uri = "data:image/svg+xml;charset=utf-8," + quote(svg)
+        actions = (
+            '<div class="sub">'
+            f'<a href="{svg_uri}" target="_blank">放大查看</a> · '
+            f'<a href="{svg_uri}" download="{_e(file_tag)}.svg">下载SVG</a>'
+            '</div>'
+        )
+        return '<div class="plot">' + f'<div class="plot-title">{_e(title)}</div>' + actions + svg + '</div>'
+
+    cards: List[str] = []
+    cfg_count = 0
+    for cpu in sorted(grouped.keys(), key=_cpu_sort_key):
+        by_kv = grouped.get(cpu, {})
+        for kv in sorted(by_kv.keys(), key=_kv_sort_key):
+            for metric_key, col_name, unit in available:
+                by_tok = by_kv.get(kv, {}).get(metric_key, {})
+                if not by_tok:
+                    continue
+                facets: List[Tuple[str, List[Tuple[float, float, int]]]] = []
+                for tok, by_bs in by_tok.items():
+                    pts: List[Tuple[float, float, int]] = []
+                    for bs in sorted(by_bs.keys()):
+                        med = _median(by_bs.get(bs, []))
+                        if med is None:
+                            continue
+                        pts.append((bs, med, len(by_bs.get(bs, []))))
+                    if pts:
+                        facets.append((tok, pts))
+                if not facets:
+                    continue
+                facets = sorted(facets, key=lambda t: _tok_sort_key(t[0]))[:10]
+                combined_series: List[Tuple[str, List[Tuple[float, float, int]], str]] = []
+                for i, (tok, pts) in enumerate(facets):
+                    combined_series.append((f"token_len={tok}" if token_col else "all", pts, palette[i % len(palette)]))
+
+                use_g = metric_key == "BW_total_MBps" and max(p[1] for _, pts, _ in combined_series for p in pts) >= 1000.0
+                y_axis = f"{col_name} ({'G' if use_g and metric_key == 'BW_total_MBps' else unit})"
+                cfg = f"cpu={cpu} | kv={kv}"
+                cards.append(
+                    _render_series_svg(
+                        series=combined_series,
+                        title=f"EMon XLSX Metrics · {metric_key} · {cfg}",
+                        file_tag=f"emon_xlsx_{metric_key}_{cfg.replace(' ', '_').replace('|', '_').replace('=', '_')}",
+                        y_axis_label=y_axis,
+                        use_g=use_g,
+                        metric_key=metric_key,
+                    )
+                )
+                cfg_count += 1
+
+    if not cards:
+        return '<div class="muted">No plottable points found.</div>'
+
+    legend = (
+        '<div class="sub">Key plots: x=<span class="mono">batch_size</span>, series=<span class="mono">token_len</span>, grouped by <span class="mono">cpu</span> and <span class="mono">kv</span>.</div>'
+        f'<div class="sub">rows={_e(row_count)} · metrics={_e(len(available))} · charts={_e(cfg_count)}</div>'
+    )
+    return f'<div>{legend}<div class="plots">{"".join(cards)}</div></div>'
+
+
 def _parse_cpu_expr(cpu_expr: str) -> Optional[int]:
     """Best-effort parse of CPU expr like '0-15' or '0,2,4' into count."""
     s = str(cpu_expr).strip()
@@ -1568,8 +1979,6 @@ def _render_cpu_info_brief(run: RunInfo) -> str:
 
 
 def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) -> str:
-    _, csvs = _list_analysis_files(run.analysis_dir)
-
     meta = _extract_run_meta(run)
     model = meta.get("model") or "-"
     cpu = meta.get("cpu") or "-"
@@ -1586,7 +1995,15 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
     summary_path = (run.analysis_dir / "run_summary.html").resolve()
     # Also require a representative scaling CSV for embedding on the run page.
     scaling_csv = (run.analysis_dir / "token_len_scaling.csv").resolve()
-    ok, msg = _maybe_autogen_analysis(scale_test_root=scale_test_root, run=run, required=[summary_path, scaling_csv])
+    emon_xlsx_csv = (run.analysis_dir / "emon_xlsx_metrics.csv").resolve()
+    ok, msg = _maybe_autogen_analysis(
+        scale_test_root=scale_test_root,
+        run=run,
+        required=[summary_path, scaling_csv, emon_xlsx_csv],
+    )
+
+    # Refresh analysis file list (autogen may create new CSVs).
+    _, csvs = _list_analysis_files(run.analysis_dir)
 
     # Run-level summary (pre-generated by analyze_run.py)
     summary_html = ""
@@ -1613,6 +2030,21 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
             f'• <a href="{scaling_raw}" target="_blank">Download</a>'
             "</div>"
             + _render_csv_preview(scaling_csv, max_rows=200, run=run)
+        )
+
+    # Embed EMON XLSX aggregated metrics table (system view) if available.
+    emon_xlsx_embed_html = '<div class="muted">No EMon XLSX metrics CSV available.</div>'
+    if _is_within(emon_xlsx_csv, run.analysis_dir) and emon_xlsx_csv.exists() and emon_xlsx_csv.is_file():
+        rel_emon = emon_xlsx_csv.relative_to(run.run_dir).as_posix()
+        emon_raw = f"/raw/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(rel_emon)}"
+        emon_preview = f"/csv/{_e(run.ref.task)}/{_e(run.ref.suite)}/{_e(run.ref.run_id)}/{_e(emon_xlsx_csv.name)}"
+        emon_xlsx_embed_html = (
+            '<div class="sub">Embedded table: <span class="mono">emon_xlsx_metrics.csv</span> '
+            '(from EMon <span class="mono">summary.xlsx</span> → <span class="mono">system view</span> aggregated) '
+            f'• <a href="{emon_preview}">Full preview</a> '
+            f'• <a href="{emon_raw}" target="_blank">Download</a>'
+            "</div>"
+            + _render_csv_preview(emon_xlsx_csv, max_rows=200, run=run)
         )
 
     # CSV list
@@ -1660,6 +2092,7 @@ def _render_run(scale_test_root: Path, run: RunInfo, q: Dict[str, List[str]]) ->
 <section class="card">
   <h2>CSVs</h2>
     {scaling_embed_html}
+        {emon_xlsx_embed_html}
   <table class="table">
     <thead><tr><th>file</th><th>preview</th><th>download</th></tr></thead>
     <tbody>
@@ -3285,10 +3718,12 @@ def _render_server_info(scale_test_root: Path, run: RunInfo, q: Dict[str, List[s
             "</tr>"
         )
 
+    empty_row = "<tr><td colspan='6' class='muted'>No server_info found.</td></tr>"
+    body_rows = "".join(rows) if rows else empty_row
     host_table = (
         "<table class=\"table\">"
         "<thead><tr><th>tag</th><th>label</th><th>page</th><th>download</th><th>download</th><th>download</th></tr></thead>"
-        f"<tbody>{''.join(rows) if rows else '<tr><td colspan=\"6\" class=\"muted\">No server_info found.</td></tr>'}</tbody>"
+        f"<tbody>{body_rows}</tbody>"
         "</table>"
     )
 
@@ -3349,8 +3784,11 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
         required += [run.analysis_dir / "emon_job_pies_manifest.json"]
     _maybe_autogen_analysis(scale_test_root=scale_test_root, run=run, required=required)
 
-    # Special-case: emon_socket_metrics.csv page should only show preview.
-    preview_only = csv_name == "emon_socket_metrics.csv"
+    is_emon_socket = csv_name == "emon_socket_metrics.csv"
+    is_emon_xlsx = csv_name == "emon_xlsx_metrics.csv"
+
+    # Special-case: EMon CSV pages should only show preview + key plot.
+    preview_only = is_emon_socket or is_emon_xlsx
 
     # Summary stats (skip for preview-only pages)
     num_rows = 0
@@ -3385,11 +3823,14 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
                 "</tr>"
             )
 
+        empty_num_row = "<tr><td colspan='5' class='muted'>No numeric columns detected.</td></tr>"
+        num_body_rows = "".join(num_table_rows) if num_table_rows else empty_num_row
+
         num_table = (
             "<div class=\"table-scroll\">"
             "<table class=\"table small\">"
             "<thead><tr><th>numeric col</th><th>count</th><th>mean</th><th>min</th><th>max</th></tr></thead>"
-            f"<tbody>{''.join(num_table_rows) if num_table_rows else '<tr><td colspan=\"5\" class=\"muted\">No numeric columns detected.</td></tr>'}</tbody>"
+            f"<tbody>{num_body_rows}</tbody>"
             "</table>"
             "</div>"
         )
@@ -3403,10 +3844,14 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
 
     # Preview
     preview_html = _render_csv_preview(csv_path, max_rows=preview_rows, run=run)
-    emon_key_plot_html = _render_emon_memory_bandwidth_key_plot(csv_path) if preview_only else ""
+    emon_key_plot_html = ""
+    if is_emon_socket:
+        emon_key_plot_html = _render_emon_memory_bandwidth_key_plot(csv_path)
+    elif is_emon_xlsx:
+        emon_key_plot_html = _render_emon_xlsx_metrics_key_plots(csv_path)
 
     emon_compare_form = ""
-    if preview_only:
+    if is_emon_socket:
         _, emon_rows = _load_emon_job_rows(run)
         emon_opts: List[Tuple[str, str]] = []
         seen_emon: set[str] = set()
@@ -3539,7 +3984,10 @@ def _render_csv_detail(scale_test_root: Path, run: RunInfo, csv_name: str, q: Di
     {('<div class="sub">PPT 一页总结</div>' + ppt_summary_html + '<div class="sub">关键图</div>' + plot_html) if is_scaling else num_table}
 </section>
 
-{'' if is_scaling else f'''<section class="card">\n  <h2>Plots</h2>\n  {plot_html}\n</section>'''}
+{'' if is_scaling else f'''<section class="card">
+    <h2>Plots</h2>
+    {plot_html}
+</section>'''}
 
 <section class="card">
   <h2>Preview</h2>
@@ -3942,13 +4390,15 @@ def _render_emon_job_compare(scale_test_root: Path, run: RunInfo, q: Dict[str, L
     a_host = (row_a.get("server_host") or "").strip()
     b_job = (row_b.get("job_name") or "").strip()
     b_host = (row_b.get("server_host") or "").strip()
+    a_host_html = f' • host: <span class="mono">{_e(a_host)}</span>' if a_host else ""
+    b_host_html = f' • host: <span class="mono">{_e(b_host)}</span>' if b_host else ""
     body = (
         form
         + mapping_form
         + '<section class="card">'
         + '<h2>Compared Jobs</h2>'
-        + f'<div class="sub">A: <span class="mono">{_e(a_job)}</span>{(" • host: <span class=\"mono\">" + _e(a_host) + "</span>") if a_host else ""}</div>'
-        + f'<div class="sub">B: <span class="mono">{_e(b_job)}</span>{(" • host: <span class=\"mono\">" + _e(b_host) + "</span>") if b_host else ""}</div>'
+        + f'<div class="sub">A: <span class="mono">{_e(a_job)}</span>{a_host_html}</div>'
+        + f'<div class="sub">B: <span class="mono">{_e(b_job)}</span>{b_host_html}</div>'
         + '</section>'
         + '<section class="card"><h2>Socket Metrics Compare</h2>'
         + '<div class="sub">Per-cell delta uses <span class="mono">(A/B - 1) * 100%</span>.</div>'
