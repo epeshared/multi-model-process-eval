@@ -426,15 +426,16 @@ class ScaleConfig:
     mem_gb: Optional[float]
     sglang_max_total_tokens: List[str]
     sweep_env_key: str
+    server_template: Dict[str, Any]
     job_template: Dict[str, Any]
+    job_emon_enable: bool
     emon_process_after_run: bool
     emon_process_cmd: List[str]
     emon_expected_output: str
     dispatch: SSHDispatchConfig
 
 
-def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -> ScaleConfig:
-    raw = _load_json(cfg_path)
+def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool = True) -> ScaleConfig:
     template = Path(str(raw.get("template_auto_test_config") or "scripts/auto-test/embedding/config_fix_token_len.json"))
     if not template.is_absolute():
         template = (REPO_ROOT / template).resolve()
@@ -444,6 +445,66 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         result_root = (REPO_ROOT / result_root).resolve()
 
     run = raw.get("run") or {}
+    job_template = run.get("job_template") or {}
+    if not isinstance(job_template, dict):
+        raise SystemExit("config.run.job_template must be an object")
+
+    # Schema rule (intentional, no backward compat): benchmark sweep fields live under run.bench.
+    bench = run.get("bench") or {}
+    if not isinstance(bench, dict):
+        raise SystemExit("config.run.bench must be an object")
+
+    _legacy_run_bench_keys = {
+        "token_lens",
+        "batch_sizes",
+        "cpu",
+        "sglang_max_total_tokens",
+    }
+    legacy_bench_present = sorted(k for k in _legacy_run_bench_keys if k in run)
+    if legacy_bench_present:
+        legacy_joined = ", ".join([f"config.run.{k}" for k in legacy_bench_present])
+        raise SystemExit(
+            "Legacy run-level benchmark keys are no longer supported: "
+            + legacy_joined
+            + ". Move them under config.run.bench (e.g. config.run.bench.batch_sizes)."
+        )
+
+    # Schema rule (intentional, no backward compat): run-control knobs belong under job_template.
+    # Reject any legacy run-level locations (including historical aliases).
+    _legacy_run_keys = {
+        # repeat threshold
+        "repeat_threshold_sec",
+        "repeat_threshold",
+        "repeat-threshold",
+        "repeat_threash_hold",
+        "repeat-threash-hold",
+        "repeat_threash_hold_sec",
+        "repeat-threash-hold-sec",
+        # repeat max
+        "repeat_max_repeats",
+        "repeat_max",
+        "max_repeats",
+        # warmup
+        "warmup_runs",
+        # error handling
+        "continue_on_error",
+        "continue_on_failure",
+    }
+    legacy_present = sorted(k for k in _legacy_run_keys if k in run)
+    if legacy_present:
+        legacy_joined = ", ".join([f"config.run.{k}" for k in legacy_present])
+        raise SystemExit(
+            "Legacy run-level run-control keys are no longer supported: "
+            + legacy_joined
+            + ". Move them under config.run.job_template (e.g. config.run.job_template.continue_on_error)."
+        )
+
+    def _pick_first_present(d: Dict[str, Any], keys: List[str]) -> Any:
+        for k in keys:
+            if k in d:
+                return d.get(k)
+        return None
+
     sweep_env_key = str(run.get("sweep_env_key") or run.get("sweep_key") or "").strip()
     sweep_values_raw = run.get("sweep_values")
 
@@ -453,12 +514,12 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         if not token_lens:
             raise SystemExit("config.run.sweep_values is empty")
     else:
-        token_lens_int = [int(x) for x in (run.get("token_lens") or [])]
+        token_lens_int = [int(x) for x in (bench.get("token_lens") or [])]
         if not token_lens_int:
-            raise SystemExit("config.run.token_lens is empty")
+            raise SystemExit("config.run.bench.token_lens is empty")
         token_lens = [str(int(x)) for x in token_lens_int]
 
-    batch_sizes_raw = run.get("batch_sizes")
+    batch_sizes_raw = bench.get("batch_sizes")
     batch_sizes: List[int] = []
     if batch_sizes_raw is not None:
         batch_sizes = [int(x) for x in (batch_sizes_raw or [])]
@@ -469,21 +530,24 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
     # Compatible aliases (including the user-typed misspelling):
     # - repeat_threshold_sec
     # - repeat-threash-hold
-    repeat_threshold_raw = (
-        run.get("repeat_threshold_sec")
-        or run.get("repeat_threshold")
-        or run.get("repeat-threshold")
-        or run.get("repeat_threash_hold")
-        or run.get("repeat-threash-hold")
-        or run.get("repeat_threash_hold_sec")
-        or run.get("repeat-threash-hold-sec")
-    )
+    repeat_threshold_keys = [
+        "repeat_threshold_sec",
+        "repeat_threshold",
+        "repeat-threshold",
+        "repeat_threash_hold",
+        "repeat-threash-hold",
+        "repeat_threash_hold_sec",
+        "repeat-threash-hold-sec",
+    ]
+    repeat_threshold_raw = _pick_first_present(job_template, repeat_threshold_keys)
     repeat_threshold_sec: Optional[float] = None
     if repeat_threshold_raw is not None and str(repeat_threshold_raw).strip() != "":
         try:
             v = float(repeat_threshold_raw)
         except Exception:
-            raise SystemExit("config.run.repeat_threshold_sec must be a number > 0")
+            raise SystemExit(
+                "config.run.job_template.repeat_threshold_sec must be a number > 0"
+            )
         if v > 0:
             repeat_threshold_sec = float(v)
 
@@ -492,18 +556,28 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
     if repeat_threshold_sec is None and ("repeats" not in run):
         repeats = 1
 
-    repeat_max_raw = run.get("repeat_max_repeats") or run.get("repeat_max") or run.get("max_repeats")
+    repeat_max_keys = ["repeat_max_repeats", "repeat_max", "max_repeats"]
+    repeat_max_raw = _pick_first_present(job_template, repeat_max_keys)
     repeat_max_repeats = 100
     if repeat_max_raw is not None and str(repeat_max_raw).strip() != "":
         try:
             repeat_max_repeats = max(1, int(float(repeat_max_raw)))
         except Exception:
-            raise SystemExit("config.run.repeat_max_repeats must be an integer >= 1")
-    warmup_runs = int(run.get("warmup_runs") or 0)
+            raise SystemExit(
+                "config.run.job_template.repeat_max_repeats must be an integer >= 1"
+            )
+    warmup_runs = int(
+        job_template.get("warmup_runs") if ("warmup_runs" in job_template) else 0
+    )
 
-    continue_on_error = bool(run.get("continue_on_error") or run.get("continue_on_failure") or False)
+    if "continue_on_error" in job_template:
+        continue_on_error = _parse_bool(job_template.get("continue_on_error"))
+    elif "continue_on_failure" in job_template:
+        continue_on_error = _parse_bool(job_template.get("continue_on_failure"))
+    else:
+        continue_on_error = False
 
-    cpu_raw = (run.get("cpu") or {}).get("cpus")
+    cpu_raw = (bench.get("cpu") or {}).get("cpus")
     cpu_exprs = _as_str_list(cpu_raw)
     if not cpu_exprs:
         cpu_exprs = [""]
@@ -513,40 +587,71 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
     if mem_gb is not None and str(mem_gb).strip() != "":
         mem_gb_f = float(mem_gb)
 
-    sglang_mtt = _as_str_list(run.get("sglang_max_total_tokens"))
+    sglang_mtt = _as_str_list(bench.get("sglang_max_total_tokens"))
 
-    job_template = raw.get("job_template") or {}
-    if not isinstance(job_template, dict):
-        raise SystemExit("config.job_template must be an object")
+    server_template = raw.get("server_template") or {}
+    if not isinstance(server_template, dict):
+        raise SystemExit("config.server_template must be an object")
+
+    # Schema rule (intentional, no backward compat): EMON settings are a job/run concern.
+    # Reject legacy top-level emon.
+    if "emon" in raw:
+        raise SystemExit(
+            "config.emon is no longer supported. "
+            "Move it to config.run.job_template.emon (e.g., config.run.job_template.emon.process_after_run)."
+        )
+
+    # Schema rule (intentional, no backward compat): EMON capture is a job/run concern,
+    # not a server-template concern.
+    if "emon_enable" in server_template:
+        raise SystemExit(
+            "config.server_template.emon_enable is no longer supported. "
+            "Move it to config.run.job_template.emon.emon_enable"
+        )
+
+    # Legacy (no backward compat): emon_enable at job_template root.
+    if "emon_enable" in job_template:
+        raise SystemExit(
+            "config.run.job_template.emon_enable is no longer supported. "
+            "Move it to config.run.job_template.emon.emon_enable"
+        )
+
+    job_template_emon = job_template.get("emon") or {}
+    if not isinstance(job_template_emon, dict):
+        raise SystemExit("config.run.job_template.emon must be an object")
+    job_emon_enable = (
+        _parse_bool(job_template_emon.get("emon_enable")) if ("emon_enable" in job_template_emon) else False
+    )
 
     # Backward compatible: if run.sglang_max_total_tokens is not provided,
-    # we still allow a single value in job_template.extra_env.
+    # we still allow a single value in server_template.extra_env.
     if not sglang_mtt:
-        extra_env = job_template.get("extra_env") or {}
+        extra_env = server_template.get("extra_env") or {}
         if not isinstance(extra_env, dict):
             extra_env = {}
         v = str(extra_env.get("SGLANG_MAX_TOTAL_TOKENS") or "").strip()
         sglang_mtt = [v] if v else [""]
 
     if not batch_sizes:
-        # Default to job_template.batch_size if not specified.
+        # Default to server_template.batch_size if not specified.
         try:
-            batch_sizes = [int((job_template.get("batch_size") or 0))]
+            batch_sizes = [int((server_template.get("batch_size") or 0))]
         except Exception:
             batch_sizes = []
     if not batch_sizes or any(bs <= 0 for bs in batch_sizes):
-        raise SystemExit("config.run.batch_sizes is empty/invalid (or job_template.batch_size invalid)")
+        raise SystemExit(
+            "config.run.bench.batch_sizes is empty/invalid (or server_template.batch_size invalid)"
+        )
 
-    emon = raw.get("emon") or {}
-    emon_process_after_run = bool(emon.get("process_after_run", True))
-    process_cmd = emon.get("process_cmd") or [
+    emon_process_after_run = bool(job_template_emon.get("process_after_run", True))
+    process_cmd = job_template_emon.get("process_cmd") or [
         "emon",
         "-process-pyedp",
         "/opt/intel/sep/config/edp/pyedp_config.txt",
     ]
     if not isinstance(process_cmd, list) or not all(isinstance(x, str) for x in process_cmd):
-        raise SystemExit("config.emon.process_cmd must be a string list")
-    expected_output = str(emon.get("expected_output") or "summary.xlsx")
+        raise SystemExit("config.run.job_template.emon.process_cmd must be a string list")
+    expected_output = str(job_template_emon.get("expected_output") or "summary.xlsx")
 
     # Optional: multi-host dispatch via SSH (run the sweep on each server and copy back).
     ssh = run.get("ssh") or {}
@@ -851,12 +956,143 @@ def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -
         mem_gb=mem_gb_f,
         sglang_max_total_tokens=sglang_mtt,
         sweep_env_key=sweep_env_key,
+        server_template=server_template,
         job_template=job_template,
+        job_emon_enable=bool(job_emon_enable),
         emon_process_after_run=emon_process_after_run,
         emon_process_cmd=[str(x) for x in process_cmd],
         emon_expected_output=expected_output,
         dispatch=dispatch,
     )
+
+
+def _parse_scale_config(cfg_path: Path, *, resolve_ssh_passwords: bool = True) -> ScaleConfig:
+    raw = _load_json(cfg_path)
+    if not isinstance(raw, dict):
+        raise SystemExit("config JSON must be an object")
+    return _parse_scale_config_raw(raw, resolve_ssh_passwords=resolve_ssh_passwords)
+
+
+def _resolve_cfg_path_arg(path_raw: str) -> Path:
+    cfg_path_in = Path(path_raw)
+    if cfg_path_in.is_absolute():
+        cfg_path = cfg_path_in
+    else:
+        # Prefer resolving relative paths against the user's current working directory.
+        # This is important when running from scripts/scale-test/embedding.
+        cand_cwd = (Path.cwd() / cfg_path_in).resolve()
+        if cand_cwd.exists():
+            cfg_path = cand_cwd
+        else:
+            cfg_path = (REPO_ROOT / cfg_path_in).resolve()
+
+    if not cfg_path.exists():
+        raise SystemExit(
+            "Config not found. Tried:\n"
+            f"- { (Path.cwd() / cfg_path_in).resolve() }\n"
+            f"- { (REPO_ROOT / cfg_path_in).resolve() }\n"
+        )
+    return cfg_path
+
+
+def _merge_job_remote_raw(*, job_raw: Dict[str, Any], remote_raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge a job config and a remote/server config into one legacy config dict.
+
+    Goal: keep the existing parser/backends unchanged while letting users split
+    the config file.
+
+    Precedence rules:
+    - Job config is authoritative for sweep/job behavior (token_lens, batch_sizes, server_template, emon).
+    - Remote config is authoritative for dispatch/SSH/server behavior (servers, remote_repo_dir, ssh, requirements...).
+    """
+
+    out: Dict[str, Any] = dict(job_raw or {})
+    rraw = remote_raw or {}
+
+    # Fill missing top-level keys from remote (but do not override job content).
+    for k in ["version", "description", "template_auto_test_config", "result_root", "server_template", "emon"]:
+        if (k not in out) or (out.get(k) in (None, "", [], {})):
+            if k in rraw and rraw.get(k) not in (None, "", [], {}):
+                out[k] = rraw.get(k)
+
+    job_run = out.get("run") if isinstance(out.get("run"), dict) else {}
+    remote_run = rraw.get("run") if isinstance(rraw.get("run"), dict) else {}
+
+    sweep_keys = {
+        "sweep_env_key",
+        "sweep_key",
+        "sweep_values",
+        "token_lens",
+        "batch_sizes",
+        "repeats",
+        "repeat_threshold_sec",
+        "repeat_threshold",
+        "repeat-threshold",
+        "repeat_max_repeats",
+        "repeat_max",
+        "max_repeats",
+        "warmup_runs",
+        "continue_on_error",
+        "continue_on_failure",
+        "cpu",
+        "memory",
+        "sglang_max_total_tokens",
+    }
+
+    remote_keys = {
+        "servers",
+        "remote_repo_dir",
+        "remote_result_root",
+        "remote_python",
+        "install_requirements",
+        "requirements_profile",
+        "requirements_files",
+        "pip_extra_args",
+        "pre_requirements_file",
+        "password_file",
+        "ssh",
+    }
+
+    merged_run: Dict[str, Any] = dict(job_run)
+    for k, v in remote_run.items():
+        if k in remote_keys:
+            merged_run[k] = v
+        elif k in sweep_keys:
+            # Only backfill sweep keys from remote if job didn't set them.
+            if k not in merged_run or merged_run.get(k) in (None, "", [], {}):
+                merged_run[k] = v
+        else:
+            # Conservative: do not override job behavior for unknown keys.
+            if k not in merged_run:
+                merged_run[k] = v
+
+    out["run"] = merged_run
+    return out
+
+
+def _write_merged_config_cache(*, job_cfg: Path, remote_cfg: Optional[Path], merged: Dict[str, Any]) -> Path:
+    # Keep a stable, inspectable merged config on disk. This also gives dispatch
+    # a filename to scp/rsync to remote hosts.
+    cache_dir = (REPO_ROOT / "scripts/scale-test/embedding/.cache/merged_configs").resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _slug(p: Path) -> str:
+        s = p.stem
+        out = []
+        for ch in s:
+            if ch.isalnum() or ch in {"-", "_", "."}:
+                out.append(ch)
+            else:
+                out.append("_")
+        return "".join(out) or "config"
+
+    name = _slug(job_cfg)
+    if remote_cfg is not None:
+        name = f"{name}__{_slug(remote_cfg)}"
+
+    path = (cache_dir / f"{name}.merged.json").resolve()
+    _dump_json(path, merged)
+    return path
 
 
 def _ssh_host_target(host: str, user: str) -> str:
@@ -1051,15 +1287,15 @@ def _requirements_profile_default_file(profile: str) -> str:
     return ""
 
 
-def _port_from_base_url(job_template: Dict[str, Any]) -> Optional[int]:
-    """Extract port from job_template base_url/openai_base_url, best-effort."""
+def _port_from_base_url(server_template: Dict[str, Any]) -> Optional[int]:
+    """Extract port from server_template base_url/openai_base_url, best-effort."""
 
-    if not isinstance(job_template, dict):
+    if not isinstance(server_template, dict):
         return None
     raw = (
-        job_template.get("base_url")
-        or job_template.get("openai_base_url")
-        or job_template.get("api_base")
+        server_template.get("base_url")
+        or server_template.get("openai_base_url")
+        or server_template.get("api_base")
         or ""
     )
     s = str(raw or "").strip()
@@ -1623,23 +1859,23 @@ def _dispatch_multi_host(
                 before_cmds.append(cmd)
 
         pre_req_prefix = ""
-        # Export job_template model hints so pre-requirement scripts (e.g. download-models.sh)
+        # Export server_template model hints so pre-requirement scripts (e.g. download-models.sh)
         # can download only what the current sweep actually uses.
-        jt_model_dir = str(scale.job_template.get("model_dir") or "").strip()
-        jt_model = str(scale.job_template.get("model") or "").strip()
-        jt_model_id = str(
-            scale.job_template.get("model_id")
-            or scale.job_template.get("served_model_name")
-            or scale.job_template.get("served_model")
+        st_model_dir = str(scale.server_template.get("model_dir") or "").strip()
+        st_model = str(scale.server_template.get("model") or "").strip()
+        st_model_id = str(
+            scale.server_template.get("model_id")
+            or scale.server_template.get("served_model_name")
+            or scale.server_template.get("served_model")
             or ""
         ).strip()
         env_exports: List[str] = []
-        if jt_model_dir:
-            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL_DIR={shlex.quote(jt_model_dir)}")
-        if jt_model:
-            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL={shlex.quote(jt_model)}")
-        if jt_model_id:
-            env_exports.append(f"export MMPE_JOB_TEMPLATE_MODEL_ID={shlex.quote(jt_model_id)}")
+        if st_model_dir:
+            env_exports.append(f"export MMPE_SERVER_TEMPLATE_MODEL_DIR={shlex.quote(st_model_dir)}")
+        if st_model:
+            env_exports.append(f"export MMPE_SERVER_TEMPLATE_MODEL={shlex.quote(st_model)}")
+        if st_model_id:
+            env_exports.append(f"export MMPE_SERVER_TEMPLATE_MODEL_ID={shlex.quote(st_model_id)}")
         if env_exports:
             pre_req_prefix += " ".join(x + ";" for x in env_exports) + " "
         if before_cmds:
@@ -1660,7 +1896,7 @@ def _dispatch_multi_host(
         # Preflight: kill any stale listener on the configured base_url port *before*
         # running setup/pip installs. This avoids confusing "CPU is pegged" symptoms
         # from an old server process that is unrelated to the current run.
-        base_port = _port_from_base_url(scale.job_template)
+        base_port = _port_from_base_url(scale.server_template)
         if base_port:
             setup_cmds.append(
                 "PORT="
@@ -1871,7 +2107,7 @@ def _dispatch_multi_host(
             + "set +e; "
             # Force python to flush promptly so SSH logs show progress.
             + f"PYTHONUNBUFFERED=1 {server.remote_python} scripts/scale-test/embedding/run_scale_fix_token_len.py "
-            + f"--config {shlex.quote(remote_cfg_path)} "
+            + f"--job-config {shlex.quote(remote_cfg_path)} "
             + "--no-ssh-dispatch "
             + ("--resume " if resume else "")
             + f"--scale-id {shlex.quote(scale_id)} "
@@ -2414,11 +2650,11 @@ def _generate_auto_test_config(
     # Let the scale-test control warmup via per-job warmup_runs.
     cfg["defaults"] = defaults
 
-    jt = scale.job_template
+    jt = scale.server_template
     backend = str(jt.get("backend") or "sglang").strip()
     model = str(jt.get("model") or "").strip()
     if not model:
-        raise SystemExit("job_template.model is required")
+        raise SystemExit("server_template.model is required")
     model_dir = str(jt.get("model_dir") or "").strip()
     base_url = str(jt.get("base_url") or "").strip()
 
@@ -2442,7 +2678,7 @@ def _generate_auto_test_config(
 
     restart_servers = bool(jt.get("restart_servers", True))
     stop_server_after_job = bool(jt.get("stop_server_after_job", True))
-    emon_enable = bool(jt.get("emon_enable", False))
+    emon_enable = bool(scale.job_emon_enable)
     extra_env = jt.get("extra_env") or {}
     if not isinstance(extra_env, dict):
         extra_env = {}
@@ -2457,7 +2693,7 @@ def _generate_auto_test_config(
         elif jt_device_raw in {"cpu"}:
             device = "cpu"
         else:
-            raise SystemExit("job_template.device must be 'cpu' or 'cuda' (or 'gpu')")
+            raise SystemExit("server_template.device must be 'cpu' or 'cuda' (or 'gpu')")
 
     # Optional: conda env name for SGLang server python (portable; avoids absolute paths).
     # - If user already provided SGLANG_PYTHON or SGLANG_CONDA_ENV via extra_env, do not override.
@@ -2604,7 +2840,7 @@ def _generate_auto_test_config(
             # For HTTP backends, large batch sizes on CPU can exceed the default
             # 120s request timeout during warmup/first runs.
             #
-            # Use job_template.embedding_http_timeout_sec / http_timeout_sec to
+            # Use server_template.embedding_http_timeout_sec / http_timeout_sec to
             # override; otherwise default to 900s.
             http_timeout_sec: Optional[int] = None
             for k in ["embedding_http_timeout_sec", "http_timeout_sec", "embedding_http_timeout", "http_timeout"]:
@@ -3086,7 +3322,16 @@ def _run_post_analyze(*, run_dir: Path, tee: bool) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to scale-test config JSON")
+    ap.add_argument(
+        "--job-config",
+        required=True,
+        help="Path to job/run config JSON (sweep + server_template + run.job_template.emon)",
+    )
+    ap.add_argument(
+        "--remote-config",
+        default="",
+        help="Optional path to remote/server config JSON (servers + remote_repo_dir + ssh)",
+    )
     ap.add_argument("--tee", action="store_true", help="Stream auto-test output to console")
     ap.add_argument("--no-tee", action="store_true", help="Do not stream output to console (still logs to files)")
     ap.add_argument("--dry-run", action="store_true", help="Do not execute jobs; print commands only")
@@ -3121,27 +3366,23 @@ def main() -> int:
 
     tee = bool(args.tee) and not bool(args.no_tee)
 
-    cfg_path_in = Path(args.config)
-    cfg_path: Path
-    if cfg_path_in.is_absolute():
-        cfg_path = cfg_path_in
-    else:
-        # Prefer resolving relative paths against the user's current working directory.
-        # This is important when running from scripts/scale-test/embedding.
-        cand_cwd = (Path.cwd() / cfg_path_in).resolve()
-        if cand_cwd.exists():
-            cfg_path = cand_cwd
-        else:
-            cand_repo = (REPO_ROOT / cfg_path_in).resolve()
-            cfg_path = cand_repo
-    if not cfg_path.exists():
-        raise SystemExit(
-            "Config not found. Tried:\n"
-            f"- { (Path.cwd() / cfg_path_in).resolve() }\n"
-            f"- { (REPO_ROOT / cfg_path_in).resolve() }\n"
-        )
+    job_cfg = _resolve_cfg_path_arg(str(args.job_config))
+    job_raw = _load_json(job_cfg)
+    if not isinstance(job_raw, dict):
+        raise SystemExit("job_config JSON must be an object")
 
-    scale = _parse_scale_config(cfg_path, resolve_ssh_passwords=not bool(args.no_ssh_dispatch))
+    remote_cfg: Optional[Path] = None
+    remote_raw: Optional[Dict[str, Any]] = None
+    if str(args.remote_config or "").strip():
+        remote_cfg = _resolve_cfg_path_arg(str(args.remote_config))
+        remote_raw_any = _load_json(remote_cfg)
+        if remote_raw_any is not None and not isinstance(remote_raw_any, dict):
+            raise SystemExit("remote_config JSON must be an object")
+        remote_raw = remote_raw_any if isinstance(remote_raw_any, dict) else None
+
+    merged_raw = _merge_job_remote_raw(job_raw=job_raw, remote_raw=remote_raw)
+    cfg_path = _write_merged_config_cache(job_cfg=job_cfg, remote_cfg=remote_cfg, merged=merged_raw)
+    scale = _parse_scale_config_raw(merged_raw, resolve_ssh_passwords=not bool(args.no_ssh_dispatch))
 
     # Allow overriding result_root from CLI.
     result_root = scale.result_root
@@ -3332,9 +3573,9 @@ def main() -> int:
                 {
                     "variant": variant_name,
                     "job_name": "",
-                    "backend": str(scale.job_template.get("backend") or ""),
-                    "model": str(scale.job_template.get("model") or ""),
-                    "model_id": str(scale.job_template.get("model_id") or ""),
+                    "backend": str(scale.server_template.get("backend") or ""),
+                    "model": str(scale.server_template.get("model") or ""),
+                    "model_id": str(scale.server_template.get("model_id") or ""),
                     "batch_size": "",
                     "token_len": "",
                     "tps": "",

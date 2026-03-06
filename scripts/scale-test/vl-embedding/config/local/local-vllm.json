@@ -13,24 +13,22 @@
       "1280x720",
       "1920x1080"
     ],
-    "batch_sizes": [
-      1,
-      2,
-      4,
-      8
-    ],
-    "repeat_threshold_sec": 1,
-    "repeat_max_repeats": 100,
-    "warmup_runs": 1,
-    "continue_on_error": true,
-    "cpu": {
-      "cpus": [
-        "0-31"
+    "bench": {
+      "batch_sizes": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "cpu": {
+        "cpus": [
+          "0-31"
+        ]
+      },
+      "sglang_max_total_tokens": [
+        ""
       ]
     },
-    "sglang_max_total_tokens": [
-      ""
-    ],
     "servers": [],
     "remote_repo_dir": "",
     "remote_result_root": "",
@@ -46,9 +44,18 @@
       "port": 22,
       "identity_file": "",
       "options": []
+    },
+    "job_template": {
+      "repeat_threshold_sec": 1,
+      "repeat_max_repeats": 100,
+      "warmup_runs": 1,
+      "continue_on_error": true,
+      "emon": {
+        "emon_enable": false
+      }
     }
   },
-  "job_template": {
+  "server_template": {
     "script": "run_fix_image_size",
     "backend": "vllm-http",
     "device": "cuda",
@@ -65,7 +72,6 @@
     "dtype": "auto",
     "restart_servers": true,
     "stop_server_after_job": true,
-    "emon_enable": false,
     "extra_env": {
       "IMAGE_TRANSPORT": "data-url",
       "WARMUP_SAMPLES": "1",

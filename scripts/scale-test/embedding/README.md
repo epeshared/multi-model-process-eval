@@ -9,6 +9,11 @@ post-processing into `summary.xlsx` using:
 
 `emon -process-pyedp /opt/intel/sep/config/edp/pyedp_config.txt`
 
+EMON config knobs:
+
+- Enable EMON collection per job via `run.job_template.emon.emon_enable`.
+- Enable post-processing via `run.job_template.emon.process_after_run`.
+
 Note: `emon -process-pyedp` runs a Python metric post-processor (`pyedp`) under whatever `python3`
 is on your `PATH`. Make sure your active Python environment has the required deps installed:
 
@@ -18,17 +23,34 @@ is on your `PATH`. Make sure your active Python environment has the required dep
 
 1) Edit config:
 
-- `scripts/scale-test/embedding/config_scale_fix_token_len.json`
+- Job/run config: `scripts/scale-test/embedding/config/conf-job.json`
+- Optional remote/server config: `scripts/scale-test/embedding/config/conf-remote.json`
 
 2) Run:
 
 - `conda activate sglang-cpu`
 
-- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --job-config scripts/scale-test/embedding/config/conf-job.json --tee`
+
+### Split config (job/run vs remote/servers)
+
+If you want to keep sweep/job settings separate from SSH/remote server settings, use:
+
+- Job config (sweep + server_template + emon): `scripts/scale-test/embedding/config/conf-job.json`
+- Remote config (servers + ssh + remote_repo_dir): `scripts/scale-test/embedding/config/conf-remote.json`
+
+Run with two configs:
+
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --job-config scripts/scale-test/embedding/config/conf-job.json --remote-config scripts/scale-test/embedding/config/conf-remote.json --tee`
+
+Notes:
+
+- `--remote-config` is optional (useful for local-only runs).
+- If a server `ip` is `127.0.0.1` / `localhost`, the dispatch code treats it as local and does not require SSH.
 
 Device selection:
 
-- Set `job_template.device` to `"cpu"` or `"cuda"` in your scale-test JSON.
+- Set `server_template.device` to `"cpu"` or `"cuda"` in your scale-test JSON.
 	- `cuda` uses `scripts/embedding/sglang/start_sglang_server_cuda.sh`
 	- `cpu` uses `scripts/embedding/sglang/start_sglang_server.sh`
 
@@ -36,7 +58,7 @@ Python selection (`SGLANG_PYTHON`):
 
 - You can omit `SGLANG_PYTHON` in JSON. When starting an SGLang server, the auto-test runner defaults it to its own interpreter (`sys.executable`).
 - Local runs still need you to execute the runner under the right env (e.g. `conda run -n <env> python ...` / `conda run -n <env> bash ...`), otherwise the default interpreter may not have `sglang` installed.
-- Optional (JSON-only, portable): set `job_template.conda_env` to a conda env name (e.g. `"xtang-embedding-cuda"`). This will set `SGLANG_CONDA_ENV` and the server start script will run via `conda run -n <env> python ...`.
+- Optional (JSON-only, portable): set `server_template.conda_env` to a conda env name (e.g. `"xtang-embedding-cuda"`). This will set `SGLANG_CONDA_ENV` and the server start script will run via `conda run -n <env> python ...`.
 
 ## Generate local test images (different resolutions)
 
@@ -57,7 +79,7 @@ Notes:
 If a run was interrupted (SSH disconnect, reboot, etc), you can re-run the same
 `scale_id` and have the runner only execute the missing work:
 
-- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --scale-id <scale_id> --resume --tee`
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --job-config scripts/scale-test/embedding/config/conf-job.json --remote-config scripts/scale-test/embedding/config/conf-remote.json --scale-id <scale_id> --resume --tee`
 
 Behavior:
 
@@ -74,7 +96,7 @@ It writes the local launcher logs under the matching run directory:
 
 Example:
 
-- `bash scripts/scale-test/embedding/run_scale_fix_token_len.sh --config scripts/scale-test/embedding/config_scale_fix_token_len.json --nohup`
+- `bash scripts/scale-test/embedding/run_scale_fix_token_len.sh --job-config scripts/scale-test/embedding/config/conf-job.json --remote-config scripts/scale-test/embedding/config/conf-remote.json --nohup`
 - `bash scripts/scale-test/embedding/monitor_scale_fix_token_len.sh --scale-id <scale_id>`
 
 ## Outputs
@@ -125,14 +147,14 @@ The top-level `aggregate.csv` includes a `variant` column to distinguish combina
 
 ## Sweeping CPU sets / KV cache limit
 
-You can sweep additional dimensions directly under `run`:
+You can sweep additional dimensions under `run.bench`:
 
-- `run.cpu.cpus`: either a single string (e.g. `"0-7"`) or a list (e.g. `["0-7", "8-15"]`)
-- `run.sglang_max_total_tokens`: either a single value or a list (e.g. `["120000", "250000"]`)
+- `run.bench.cpu.cpus`: either a single string (e.g. `"0-7"`) or a list (e.g. `["0-7", "8-15"]`)
+- `run.bench.sglang_max_total_tokens`: either a single value or a list (e.g. `["120000", "250000"]`)
 
 When provided as lists, the runner executes the cartesian product:
 
-`cpu.cpus × sglang_max_total_tokens × batch_sizes × token_lens × repeats`
+`bench.cpu.cpus × bench.sglang_max_total_tokens × bench.batch_sizes × bench.token_lens × repeats`
 
 ## Multi-host (SSH dispatch)
 
@@ -231,7 +253,7 @@ Example `passwords.json`:
 
 Then run as usual:
 
-- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --config scripts/scale-test/embedding/config_scale_fix_token_len.json --tee`
+- `python3 scripts/scale-test/embedding/run_scale_fix_token_len.py --job-config scripts/scale-test/embedding/config/conf-job.json --remote-config scripts/scale-test/embedding/config/conf-remote.json --tee`
 
 Notes / assumptions:
 
@@ -281,13 +303,13 @@ By default, the scale-test runner stops immediately when the underlying auto-tes
 
 If you want to **continue running later variants** (e.g. other CPU sets / other `SGLANG_MAX_TOTAL_TOKENS` values) even after a failure, set:
 
-- `run.continue_on_error: true`
+- `run.job_template.continue_on_error: true`
 
 When enabled, the runner will keep going and will also write a marker row into `aggregate.csv` for failed variants (so you can see which combination failed).
 
 ## Notes on SGLang caching (important for apples-to-apples TPS)
 
-SGLang maintains a radix/prefix cache. When you run **warmup_runs > 0** and then benchmark the
+SGLang maintains a radix/prefix cache. When you run **run.job_template.warmup_runs > 0** and then benchmark the
 **same synthetic inputs again** (same `SYNTHETIC_SEED` / same dataset), the benchmark can become
 dominated by cache hits (server logs show large `#cached-token` and tiny `#new-token`).
 

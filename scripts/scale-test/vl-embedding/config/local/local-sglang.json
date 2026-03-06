@@ -13,24 +13,22 @@
       "1280x720",
       "1920x1080"
     ],
-    "batch_sizes": [
-      1,
-      2,
-      4,
-      8
-    ],
-    "repeat_threshold_sec": 1,
-    "repeat_max_repeats": 100,
-    "warmup_runs": 1,
-    "continue_on_error": true,
-    "cpu": {
-      "cpus": [
-        "0-31"
+    "bench": {
+      "batch_sizes": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "cpu": {
+        "cpus": [
+          "0-31"
+        ]
+      },
+      "sglang_max_total_tokens": [
+        ""
       ]
     },
-    "sglang_max_total_tokens": [
-      ""
-    ],
     "servers": [],
     "remote_repo_dir": "",
     "remote_result_root": "",
@@ -46,9 +44,25 @@
       "port": 22,
       "identity_file": "",
       "options": []
+    },
+    "job_template": {
+      "repeat_threshold_sec": 1,
+      "repeat_max_repeats": 100,
+      "warmup_runs": 1,
+      "continue_on_error": true,
+      "emon": {
+        "emon_enable": false,
+        "process_after_run": false,
+        "process_cmd": [
+          "emon",
+          "-process-pyedp",
+          "/opt/intel/sep/config/edp/pyedp_config.txt"
+        ],
+        "expected_output": "summary.xlsx"
+      }
     }
   },
-  "job_template": {
+  "server_template": {
     "script": "run_fix_image_size",
     "backend": "sglang",
     "device": "cuda",
@@ -65,7 +79,6 @@
     "dtype": "bfloat16",
     "restart_servers": true,
     "stop_server_after_job": true,
-    "emon_enable": false,
     "extra_env": {
       "SGLANG_ENABLE_MULTIMODAL": "1",
       "IMAGE_TRANSPORT": "data-url",
@@ -74,14 +87,5 @@
       "IMAGE_DIR": "scripts/scale-test/vl-embedding/images",
       "SGLANG_REQUIRE_IOMP": "0"
     }
-  },
-  "emon": {
-    "process_after_run": false,
-    "process_cmd": [
-      "emon",
-      "-process-pyedp",
-      "/opt/intel/sep/config/edp/pyedp_config.txt"
-    ],
-    "expected_output": "summary.xlsx"
   }
 }

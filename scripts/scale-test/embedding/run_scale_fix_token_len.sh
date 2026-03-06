@@ -20,17 +20,19 @@ if [[ "${AUTO_ACTIVATE_SGLANG_CPU:-0}" == "1" ]]; then
 	fi
 fi
 
-CFG="${SCRIPT_DIR}/config_scale_fix_token_len_amd.json"
+JOB_CFG="${SCRIPT_DIR}/config/conf-job.json"
+REMOTE_CFG=""
 
 NOHUP_MODE=0
 
 usage() {
 	cat <<'EOF'
 Usage:
-	./scripts/scale-test/embedding/run_scale_fix_token_len.sh [--config <FILE>] [--nohup] [runner args...]
+	./scripts/scale-test/embedding/run_scale_fix_token_len.sh [--job-config <FILE> [--remote-config <FILE>]] [--nohup] [runner args...]
 
 Options:
-	--config <FILE>   Scale-test config JSON (default: config_scale_fix_token_len_amd.json)
+	--job-config <FILE>     Job/run config JSON (sweep + server_template + run.job_template.emon) (default: config/conf-job.json)
+	--remote-config <FILE>  Remote/server config JSON (servers + ssh + remote_repo_dir)
 	--nohup           Run in background and write logs under <result_root>/<scale_id>/launcher_logs/
 
 Forwarded runner flags (examples):
@@ -46,21 +48,28 @@ EOF
 
 # Accept either:
 #   ./run_scale_fix_token_len.sh --tee
-#   ./run_scale_fix_token_len.sh --config path/to/config.json --tee
-#   ./run_scale_fix_token_len.sh path/to/config.json --tee   (back-compat)
+#   ./run_scale_fix_token_len.sh --job-config path/to/job.json --tee
+#   ./run_scale_fix_token_len.sh path/to/job.json --tee   (shorthand)
 #
 # Extra options (forwarded to the Python runner):
 #   --remote-clean-repo[=true|false]   If true, delete remote_repo_dir on the remote host
 #                                     before rsync syncing this repo (default: false).
-if [[ ${1:-} == "--config" ]]; then
+if [[ ${1:-} == "--job-config" ]]; then
 	if [[ -z ${2:-} ]]; then
-		echo "error: --config requires a value" >&2
+		echo "error: --job-config requires a value" >&2
 		exit 2
 	fi
-	CFG="$2"
+	JOB_CFG="$2"
+	shift 2
+elif [[ ${1:-} == "--remote-config" ]]; then
+	if [[ -z ${2:-} ]]; then
+		echo "error: --remote-config requires a value" >&2
+		exit 2
+	fi
+	REMOTE_CFG="$2"
 	shift 2
 elif [[ ${1:-} != "" && ${1:-} != -* ]]; then
-	CFG="$1"
+	JOB_CFG="$1"
 	shift || true
 fi
 
@@ -68,6 +77,10 @@ fi
 forward_args=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+		--job-config)
+			JOB_CFG="${2:-}"; shift 2 ;;
+		--remote-config)
+			REMOTE_CFG="${2:-}"; shift 2 ;;
 		--nohup)
 			NOHUP_MODE=1
 			shift
@@ -125,13 +138,14 @@ if [[ "$NOHUP_MODE" == "1" ]]; then
 		set -- "--scale-id" "$SCALE_ID" "$@"
 	fi
 
-	# Determine result_root (prefer CLI override, otherwise read config.result_root).
+	# Determine result_root (prefer CLI override, otherwise read <cfg>.result_root).
+	CFG_FOR_ROOT="$JOB_CFG"
 	result_root_cfg=$(
 		python3 - <<PY 2>/dev/null || python - <<PY
 import json
 import sys
 from pathlib import Path
-cfg = Path(${CFG@Q}).expanduser()
+cfg = Path(${CFG_FOR_ROOT@Q}).expanduser()
 obj = json.loads(cfg.read_text(encoding='utf-8'))
 print((obj.get('result_root') or '').strip())
 PY
@@ -152,7 +166,11 @@ PY
 	PID_PATH="${LAUNCH_DIR}/nohup.pid"
 	CMD_PATH="${LAUNCH_DIR}/command.txt"
 
-	cmd=(PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_token_len.py" --config "$CFG" "${extra_args[@]}" "$@")
+	cmd=(env PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_token_len.py" --job-config "$JOB_CFG")
+	if [[ -n "$REMOTE_CFG" ]]; then
+		cmd+=(--remote-config "$REMOTE_CFG")
+	fi
+	cmd+=("${extra_args[@]}" "$@")
 	printf '%q ' "${cmd[@]}" > "$CMD_PATH"
 	echo >> "$CMD_PATH"
 
@@ -167,4 +185,9 @@ PY
 	exit 0
 fi
 
-PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_token_len.py" --config "$CFG" "${extra_args[@]}" "$@"
+cmd=(env PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_token_len.py" --job-config "$JOB_CFG")
+if [[ -n "$REMOTE_CFG" ]]; then
+	cmd+=(--remote-config "$REMOTE_CFG")
+fi
+cmd+=("${extra_args[@]}" "$@")
+exec "${cmd[@]}"

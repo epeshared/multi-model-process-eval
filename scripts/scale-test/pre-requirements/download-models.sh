@@ -29,11 +29,11 @@ download_one() {
 }
 
 infer_qwen_repo_id() {
-	# Infer a HuggingFace repo ID from job_template hints.
+	# Infer a HuggingFace repo ID from server_template hints.
 	# Returns empty string if unknown.
-	local model_id="${MMPE_JOB_TEMPLATE_MODEL_ID:-}"
-	local model="${MMPE_JOB_TEMPLATE_MODEL:-}"
-	local model_dir="${MMPE_JOB_TEMPLATE_MODEL_DIR:-}"
+	local model_id="${MMPE_SERVER_TEMPLATE_MODEL_ID:-}"
+	local model="${MMPE_SERVER_TEMPLATE_MODEL:-}"
+	local model_dir="${MMPE_SERVER_TEMPLATE_MODEL_DIR:-}"
 
 	# If model_id is already a full HF repo id (org/name), trust it.
 	if [[ -n "${model_id}" && "${model_id}" == */* ]]; then
@@ -71,7 +71,7 @@ infer_qwen_repo_id() {
 }
 
 infer_local_dir() {
-	local model_dir="${MMPE_JOB_TEMPLATE_MODEL_DIR:-}"
+	local model_dir="${MMPE_SERVER_TEMPLATE_MODEL_DIR:-}"
 	if [[ -n "${model_dir}" ]]; then
 		echo "${model_dir}"
 		return 0
@@ -80,16 +80,16 @@ infer_local_dir() {
 	echo "${MODEL_ROOT}"
 }
 
-# Prefer: only download the model used by the current sweep (job_template).
+# Prefer: only download the model used by the current sweep (server_template).
 # Dispatcher exports:
-# - MMPE_JOB_TEMPLATE_MODEL_DIR
-# - MMPE_JOB_TEMPLATE_MODEL
-# - MMPE_JOB_TEMPLATE_MODEL_ID
+# - MMPE_SERVER_TEMPLATE_MODEL_DIR
+# - MMPE_SERVER_TEMPLATE_MODEL
+# - MMPE_SERVER_TEMPLATE_MODEL_ID
 repo_id="$(infer_qwen_repo_id)"
 local_dir="$(infer_local_dir)"
 
 if [[ -n "${repo_id}" ]]; then
-	# If job_template specifies a concrete model_dir, use it.
+	# If server_template specifies a concrete model_dir, use it.
 	# Otherwise, store under MODEL_ROOT with a reasonable default.
 	if [[ "${local_dir}" == "${MODEL_ROOT}" ]]; then
 		# Put under MODEL_ROOT/<org>/<name>
@@ -99,7 +99,7 @@ if [[ -n "${repo_id}" ]]; then
 	fi
 	download_one "${repo_id}" "${local_dir}"
 else
-	echo "[warn] could not infer model repo from job_template; falling back to legacy downloads" >&2
+	echo "[warn] could not infer model repo from server_template; falling back to legacy downloads" >&2
 	# Keep local-dir paths under MODEL_ROOT so this script works for non-root users
 	# (e.g. ubuntu on cloud images).
 	download_one Qwen/Qwen3-Embedding-4B "${MODEL_ROOT}/Qwen/Qwen3-Embedding-4B"

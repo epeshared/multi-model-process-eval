@@ -1,23 +1,7 @@
 {
   "version": 1,
-  "description": "Scale-test: sweep SYNTHETIC_TOKEN_LEN for run_fix_token_len under CPU/memory limits, with optional EMON capture + pyedp processing.",
-  "template_auto_test_config": "scripts/auto-test/embedding/config_fix_token_len.json",
-  "result_root": "scripts/scale-test/embedding/result/fix_token_len",
+  "description": "Scale-test remote/server config (servers + remote_repo_dir/result_root + ssh/requirements). Pair with conf-job.json.",
   "run": {
-    "token_lens": [
-      10,
-      20,
-      50,
-      100
-    ],
-    "batch_sizes": [
-      50,
-      100,
-      200
-    ],
-    "repeat_threshold_sec": 1,
-    "warmup_runs": 1,
-    "continue_on_error": true,  
     "servers": [
       {
         "ip": "82.157.169.128",
@@ -85,34 +69,5 @@
       "identity_file": "",
       "options": []
     }
-  },
-  "job_template": {
-    "backend": "sglang",
-    "model": "qwen3-embedding-0.6b",
-    "model_dir": "/home/ubuntu/models/Qwen/Qwen3-Embedding-0.6B",
-    "served_model_name": "Qwen3-Embedding-0.6B",
-    "model_id": "Qwen3-Embedding-0.6B",
-    "host": "0.0.0.0",
-    "port": 30000,
-    "base_url": "http://127.0.0.1:30000",
-    "mode": "token_len",
-    "max_samples": 1000,
-    "batch_size": 200,
-    "dtype": "bfloat16",
-    "restart_servers": true,
-    "stop_server_after_job": true,
-    "emon_enable": false,
-    "extra_env": {
-      "SGLANG_PYTHON": "/home/ubuntu/miniforge3/envs/sglang-cpu/bin/python"
-    }
-  },
-  "emon": {
-    "process_after_run": false,
-    "process_cmd": [
-      "emon",
-      "-process-pyedp",
-      "/opt/intel/sep/config/edp/pyedp_config.txt"
-    ],
-    "expected_output": "summary.xlsx"
   }
 }

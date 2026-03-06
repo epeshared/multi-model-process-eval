@@ -15,13 +15,13 @@ Example (local):
 ## Run
 
 - Local (no SSH dispatch):
-	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --config scripts/scale-test/vl-embedding/config/local/local.json --no-ssh-dispatch --tee`
+	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --job-config scripts/scale-test/vl-embedding/config/local/smoke.json --no-ssh-dispatch --tee`
 
 - Remote (SSH dispatch):
-	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --config scripts/scale-test/vl-embedding/config/t-cloud/s9e-16c-64G.json --tee`
+	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --job-config scripts/scale-test/vl-embedding/config/t-cloud/s9e-16c-64G.json --tee`
 
 - Background launch:
-	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --config scripts/scale-test/vl-embedding/config/t-cloud/s9e-16c-64G.json --nohup --scale-id <ID> --resume`
+	- `bash scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh --job-config scripts/scale-test/vl-embedding/config/t-cloud/s9e-16c-64G.json --nohup --scale-id <ID> --resume`
 	- Monitor: `bash scripts/scale-test/vl-embedding/monitor_scale_fix_image_size.sh --scale-id <ID>`
 
 Notes:
@@ -31,7 +31,7 @@ Notes:
 
 Device selection:
 
-- Set `job_template.device` to `"cuda"` (GPU) or `"cpu"` in your scale-test JSON.
+- Set `server_template.device` to `"cuda"` (GPU) or `"cpu"` in your scale-test JSON.
 	- `cuda` uses `scripts/embedding/sglang/start_sglang_server_cuda.sh`
 	- `cpu` uses `scripts/embedding/sglang/start_sglang_server.sh`
 
@@ -42,14 +42,14 @@ Python selection (`SGLANG_PYTHON`):
 	- Local: run the scale-test under the desired conda env (e.g. `conda run -n <env> bash ...`), OR explicitly set `SGLANG_PYTHON`.
 	- Remote: if you use `servers[*].conda_env` / `servers[*].remote_python`, the remote runner already uses the correct env, so `SGLANG_PYTHON` is typically not needed.
 
-- Optional (JSON-only, portable): set `job_template.conda_env` to a conda env name (e.g. `"xtang-embedding-cuda"`). This will set `SGLANG_CONDA_ENV` and the server start script will run via `conda run -n <env> python ...`.
+- Optional (JSON-only, portable): set `server_template.conda_env` to a conda env name (e.g. `"xtang-embedding-cuda"`). This will set `SGLANG_CONDA_ENV` and the server start script will run via `conda run -n <env> python ...`.
 
 Common pitfalls:
 
 - Model weights must exist under your `model_dir` (e.g. `model.safetensors`). If you only have `config.json`/tokenizer files, SGLang will fail to load.
-- For Qwen3-VL-Embedding, SGLang effectively requires CUDA today. Running with `job_template.device="cpu"` can crash with errors like `NotImplementedError: sgl_kernel::rmsnorm ... CPU backend` (this still reproduces on SGLang main as of `sglang==0.5.9`).
+- For Qwen3-VL-Embedding, SGLang effectively requires CUDA today. Running with `server_template.device="cpu"` can crash with errors like `NotImplementedError: sgl_kernel::rmsnorm ... CPU backend` (this still reproduces on SGLang main as of `sglang==0.5.9`).
 - If you see HTTP 403 + an HTML page when calling a local server (e.g. `127.0.0.1`), your environment proxy may be intercepting localhost traffic. Ensure `NO_PROXY` includes `127.0.0.1,localhost`.
-- SGLang CUDA server needs a CUDA-enabled torch env. Set `job_template.conda_env` / `SGLANG_CONDA_ENV` (or `SGLANG_PYTHON`) to a python where `torch.cuda.is_available()` is `True`.
+- SGLang CUDA server needs a CUDA-enabled torch env. Set `server_template.conda_env` / `SGLANG_CONDA_ENV` (or `SGLANG_PYTHON`) to a python where `torch.cuda.is_available()` is `True`.
 - `libiomp5.so` is auto-discovered by the SGLang start script. Only set `SGLANG_LIB_IOMP` when your host truly doesn't provide it and you know the exact path.
 	- Optional strict mode: set `SGLANG_REQUIRE_IOMP=1` to fail fast if `libiomp5.so` can't be found.
 - If `huggingface.co` is blocked in your environment, try downloading weights via a mirror endpoint, e.g.

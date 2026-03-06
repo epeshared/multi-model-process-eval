@@ -20,16 +20,16 @@ if [[ "${AUTO_ACTIVATE_SGLANG_CPU:-0}" == "1" ]]; then
   fi
 fi
 
-CFG="${SCRIPT_DIR}/config/local/local.json"
+JOB_CFG="${SCRIPT_DIR}/config/local/smoke.json"
 NOHUP_MODE=0
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh [--config <FILE>] [--nohup] [runner args...]
+  ./scripts/scale-test/vl-embedding/run_scale_fix_image_size.sh [--job-config <FILE>] [--nohup] [runner args...]
 
 Options:
-  --config <FILE>   Scale-test config JSON (default: config/local/local.json)
+  --job-config <FILE>   Scale-test job config JSON (default: config/local/smoke.json)
   --nohup           Run in background and write logs under <result_root>/<scale_id>/launcher_logs/
 
 Forwarded runner flags (examples):
@@ -45,17 +45,17 @@ EOF
 
 # Accept either:
 #   ./run_scale_fix_image_size.sh --tee
-#   ./run_scale_fix_image_size.sh --config path/to/config.json --tee
-#   ./run_scale_fix_image_size.sh path/to/config.json --tee   (back-compat)
-if [[ ${1:-} == "--config" ]]; then
+#   ./run_scale_fix_image_size.sh --job-config path/to/job.json --tee
+#   ./run_scale_fix_image_size.sh path/to/job.json --tee   (positional)
+if [[ ${1:-} == "--job-config" ]]; then
   if [[ -z ${2:-} ]]; then
-    echo "error: --config requires a value" >&2
+    echo "error: --job-config requires a value" >&2
     exit 2
   fi
-  CFG="$2"
+  JOB_CFG="$2"
   shift 2
 elif [[ ${1:-} != "" && ${1:-} != -* ]]; then
-  CFG="$1"
+  JOB_CFG="$1"
   shift || true
 fi
 
@@ -120,7 +120,7 @@ if [[ "$NOHUP_MODE" == "1" ]]; then
     python3 - <<PY 2>/dev/null || python - <<PY
 import json
 from pathlib import Path
-cfg = Path(${CFG@Q}).expanduser()
+cfg = Path(${JOB_CFG@Q}).expanduser()
 obj = json.loads(cfg.read_text(encoding='utf-8'))
 print((obj.get('result_root') or '').strip())
 PY
@@ -141,7 +141,7 @@ PY
   PID_PATH="${LAUNCH_DIR}/nohup.pid"
   CMD_PATH="${LAUNCH_DIR}/command.txt"
 
-  cmd=(PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_image_size.py" --config "$CFG" "${extra_args[@]}" "$@")
+  cmd=(PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_image_size.py" --job-config "$JOB_CFG" "${extra_args[@]}" "$@")
   printf '%q ' "${cmd[@]}" > "$CMD_PATH"
   echo >> "$CMD_PATH"
 
@@ -156,4 +156,4 @@ PY
   exit 0
 fi
 
-PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_image_size.py" --config "$CFG" "${extra_args[@]}" "$@"
+PYTHONUNBUFFERED=1 python -u "${SCRIPT_DIR}/run_scale_fix_image_size.py" --job-config "$JOB_CFG" "${extra_args[@]}" "$@"

@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "description": "Scale-test job+run config (sweep + server_template + emon). Pair with conf-remote.json for servers/SSH dispatch.",
+  "template_auto_test_config": "scripts/auto-test/embedding/config_fix_token_len.json",
+  "result_root": "scripts/scale-test/embedding/result/fix_token_len",
+  "run": {
+    "bench": {
+      "token_lens": [
+        10,
+        20,
+        50,
+        100
+      ],
+      "batch_sizes": [
+        50,
+        100,
+        200
+      ],
+      "cpu": {
+        "cpus": [
+          "0-7",
+          "0-15",
+          "0-31"
+        ]
+      },
+      "sglang_max_total_tokens": [
+        "120000",
+        "250000",
+        "500000"
+      ]
+    },
+    "job_template": {
+      "repeat_threshold_sec": 3,
+      "repeat_max_repeats": "",
+      "warmup_runs": 1,
+      "continue_on_error": true,
+      "emon": {
+        "emon_enable": true,
+        "process_after_run": true,
+        "process_cmd": [
+          "emon",
+          "-process-pyedp",
+          "/opt/intel/sep/config/edp/pyedp_config.txt"
+        ],
+        "expected_output": "summary.xlsx"
+      }
+    }
+  },
+  "server_template": {
+    "backend": "sglang",
+    "model": "qwen3-embedding-0.6b",
+    "model_dir": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-Embedding-0.6B",
+    "served_model_name": "Qwen3-Embedding-0.6B",
+    "model_id": "Qwen3-Embedding-0.6B",
+    "host": "0.0.0.0",
+    "port": 30000,
+    "base_url": "http://127.0.0.1:30000",
+    "mode": "token_len",
+    "max_samples": 1000,
+    "batch_size": 200,
+    "dtype": "bfloat16",
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "extra_env": {
+      "SGLANG_PYTHON": "/root/miniforge3/envs/sglang-cpu/bin/python"
+    }
+  }
+}
