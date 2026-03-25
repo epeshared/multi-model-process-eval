@@ -192,8 +192,28 @@ def _aggregate_repeat_metrics(
         out["parse_error"] = "no_successful_repeats"
         return out
 
-    # For embedding scripts, average key numeric metrics.
-    numeric_keys = ["tps", "latency_sec", "avg_batch_time_sec", "count", "num_batches"]
+    # Average common numeric metrics across successful repeats.
+    numeric_keys = [
+        "tps",
+        "latency_sec",
+        "avg_batch_time_sec",
+        "count",
+        "num_batches",
+        "qps",
+        "request_throughput",
+        "input_throughput",
+        "output_throughput",
+        "mean_ttft_ms",
+        "median_ttft_ms",
+        "p99_ttft_ms",
+        "mean_tpot_ms",
+        "median_tpot_ms",
+        "p99_tpot_ms",
+        "mean_e2e_latency_ms",
+        "median_e2e_latency_ms",
+        "p99_e2e_latency_ms",
+        "max_concurrency",
+    ]
     for k in numeric_keys:
         vals: List[float] = []
         for r in ok_recs:
@@ -1460,6 +1480,58 @@ def _parse_embedding_metrics(stdout_stderr: str) -> Dict[str, Any]:
     return {"summary": obj, "parse_error": "unrecognized_summary_schema"}
 
 
+def _extract_prefixed_json_line(text: str, prefix: str) -> Optional[Dict[str, Any]]:
+    pat = re.compile(rf"^{re.escape(prefix)}=(.+)$", re.MULTILINE)
+    last_obj: Optional[Dict[str, Any]] = None
+    for m in pat.finditer(text):
+        payload = (m.group(1) or "").strip()
+        if not payload:
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            last_obj = obj
+    return last_obj
+
+
+def _parse_bench_serving_metrics(stdout_stderr: str) -> Dict[str, Any]:
+    obj = _extract_prefixed_json_line(stdout_stderr, "[run_bench_serving] RESULT_JSON")
+    if not obj:
+        return {"parse_error": "no_bench_serving_json_found"}
+
+    latency_sec: Optional[float] = None
+    try:
+        mean_e2e_latency_ms = obj.get("mean_e2e_latency_ms")
+        if mean_e2e_latency_ms is not None:
+            latency_sec = float(mean_e2e_latency_ms) / 1000.0
+    except Exception:
+        latency_sec = None
+
+    return {
+        "summary": obj,
+        "tps": obj.get("output_throughput"),
+        "qps": obj.get("request_throughput"),
+        "request_throughput": obj.get("request_throughput"),
+        "input_throughput": obj.get("input_throughput"),
+        "output_throughput": obj.get("output_throughput"),
+        "latency_sec": latency_sec,
+        "count": obj.get("completed"),
+        "num_batches": obj.get("max_concurrency"),
+        "mean_e2e_latency_ms": obj.get("mean_e2e_latency_ms"),
+        "median_e2e_latency_ms": obj.get("median_e2e_latency_ms"),
+        "p99_e2e_latency_ms": obj.get("p99_e2e_latency_ms"),
+        "mean_ttft_ms": obj.get("mean_ttft_ms"),
+        "median_ttft_ms": obj.get("median_ttft_ms"),
+        "p99_ttft_ms": obj.get("p99_ttft_ms"),
+        "mean_tpot_ms": obj.get("mean_tpot_ms"),
+        "median_tpot_ms": obj.get("median_tpot_ms"),
+        "p99_tpot_ms": obj.get("p99_tpot_ms"),
+        "max_concurrency": obj.get("max_concurrency"),
+    }
+
+
 def _parse_mteb_metrics(*, output_folder: Path, tasks: List[str], model_id: str, backend: str) -> Dict[str, Any]:
     """Read scripts/embedding/mteb/results/<task>.json and extract run entry."""
 
@@ -1543,6 +1615,13 @@ def _infer_token_len(*, script: str, env: Dict[str, Any]) -> str:
             else:
                 v = env.get("SYNTHETIC_INPUT_LEN")
             return str(v) if v not in (None, "") else ""
+
+        if script == "run_bench_serving":
+            for key in ["RANDOM_INPUT_LEN", "RANDOM_INPUT", "INPUT_LEN"]:
+                v = env.get(key)
+                if v not in (None, ""):
+                    return str(v)
+            return ""
 
         # Generic fallback
         v = env.get("MAX_LENGTH")
@@ -1819,8 +1898,14 @@ def main() -> int:
             "token_len",
             "tps",
             "tps_std",
+            "qps",
+            "qps_std",
             "latency_sec",
             "latency_sec_std",
+            "mean_ttft_ms",
+            "mean_ttft_ms_std",
+            "mean_tpot_ms",
+            "mean_tpot_ms_std",
             "avg_batch_time_sec",
             "avg_batch_time_sec_std",
             "count",
@@ -1907,6 +1992,8 @@ def main() -> int:
                     # We don't have per-repeat exit codes in logs; assume OK if parsable.
                     if script in ("run_embedding_yahoo", "run_fix_token_len", "run_fix_image_size"):
                         metrics_i = _parse_embedding_metrics(text_i)
+                    elif script == "run_bench_serving":
+                        metrics_i = _parse_bench_serving_metrics(text_i)
                     elif script == "run_mteb":
                         tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
                         if not tasks:
@@ -1942,6 +2029,12 @@ def main() -> int:
                         metrics = _parse_embedding_metrics(text)
                     else:
                         metrics = {"parse_error": f"missing_log:{log_path}"}
+                elif script == "run_bench_serving":
+                    if log_path.exists():
+                        text = log_path.read_text(encoding="utf-8")
+                        metrics = _parse_bench_serving_metrics(text)
+                    else:
+                        metrics = {"parse_error": f"missing_log:{log_path}"}
                 elif script == "run_mteb":
                     tasks = [t.strip() for t in str(env.get("TASKS") or "").split(",") if t.strip()]
                     if not tasks:
@@ -1963,6 +2056,12 @@ def main() -> int:
             rec["latency_sec"] = metrics.get("latency_sec")
             rec["tps_std"] = metrics.get("tps_std")
             rec["latency_sec_std"] = metrics.get("latency_sec_std")
+            rec["qps"] = metrics.get("qps") or metrics.get("request_throughput")
+            rec["qps_std"] = metrics.get("qps_std") or metrics.get("request_throughput_std")
+            rec["mean_ttft_ms"] = metrics.get("mean_ttft_ms")
+            rec["mean_ttft_ms_std"] = metrics.get("mean_ttft_ms_std")
+            rec["mean_tpot_ms"] = metrics.get("mean_tpot_ms")
+            rec["mean_tpot_ms_std"] = metrics.get("mean_tpot_ms_std")
             _write_json(mp, rec)
 
             recs.append(rec)
@@ -1981,8 +2080,14 @@ def main() -> int:
                     "token_len": token_len,
                     "tps": rec.get("tps"),
                     "tps_std": rec.get("tps_std") or metrics.get("tps_std") or "",
+                    "qps": rec.get("qps") or metrics.get("qps") or metrics.get("request_throughput") or "",
+                    "qps_std": rec.get("qps_std") or metrics.get("qps_std") or metrics.get("request_throughput_std") or "",
                     "latency_sec": rec.get("latency_sec"),
                     "latency_sec_std": rec.get("latency_sec_std") or metrics.get("latency_sec_std") or "",
+                    "mean_ttft_ms": rec.get("mean_ttft_ms") or metrics.get("mean_ttft_ms") or "",
+                    "mean_ttft_ms_std": rec.get("mean_ttft_ms_std") or metrics.get("mean_ttft_ms_std") or "",
+                    "mean_tpot_ms": rec.get("mean_tpot_ms") or metrics.get("mean_tpot_ms") or "",
+                    "mean_tpot_ms_std": rec.get("mean_tpot_ms_std") or metrics.get("mean_tpot_ms_std") or "",
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
                     "avg_batch_time_sec_std": metrics.get("avg_batch_time_sec_std"),
                     "count": metrics.get("count"),
@@ -2038,8 +2143,14 @@ def main() -> int:
         "token_len",
         "tps",
         "tps_std",
+        "qps",
+        "qps_std",
         "latency_sec",
         "latency_sec_std",
+        "mean_ttft_ms",
+        "mean_ttft_ms_std",
+        "mean_tpot_ms",
+        "mean_tpot_ms_std",
         "avg_batch_time_sec",
         "avg_batch_time_sec_std",
         "count",
@@ -2185,6 +2296,8 @@ def main() -> int:
                     # Parse per-repeat metrics (best-effort).
                     if job.script in ("run_embedding_yahoo", "run_fix_token_len", "run_fix_image_size"):
                         metrics_i = _parse_embedding_metrics(out_i)
+                    elif job.script == "run_bench_serving":
+                        metrics_i = _parse_bench_serving_metrics(out_i)
                     elif job.script == "run_mteb":
                         tasks_i: List[str] = []
                         if job.args:
@@ -2304,6 +2417,12 @@ def main() -> int:
             merged["latency_sec"] = metrics.get("latency_sec")
             merged["tps_std"] = metrics.get("tps_std")
             merged["latency_sec_std"] = metrics.get("latency_sec_std")
+            merged["qps"] = metrics.get("qps") or metrics.get("request_throughput")
+            merged["qps_std"] = metrics.get("qps_std") or metrics.get("request_throughput_std")
+            merged["mean_ttft_ms"] = metrics.get("mean_ttft_ms")
+            merged["mean_ttft_ms_std"] = metrics.get("mean_ttft_ms_std")
+            merged["mean_tpot_ms"] = metrics.get("mean_tpot_ms")
+            merged["mean_tpot_ms_std"] = metrics.get("mean_tpot_ms_std")
             merged["backend"] = backend
             merged["model"] = model
             merged["model_id"] = model_id
@@ -2327,8 +2446,14 @@ def main() -> int:
                     "token_len": _infer_token_len(script=job.script, env=job.env),
                     "tps": merged.get("tps"),
                     "tps_std": merged.get("tps_std"),
+                    "qps": merged.get("qps"),
+                    "qps_std": merged.get("qps_std"),
                     "latency_sec": merged.get("latency_sec"),
                     "latency_sec_std": merged.get("latency_sec_std"),
+                    "mean_ttft_ms": merged.get("mean_ttft_ms"),
+                    "mean_ttft_ms_std": merged.get("mean_ttft_ms_std"),
+                    "mean_tpot_ms": merged.get("mean_tpot_ms"),
+                    "mean_tpot_ms_std": merged.get("mean_tpot_ms_std"),
                     "avg_batch_time_sec": metrics.get("avg_batch_time_sec"),
                     "avg_batch_time_sec_std": metrics.get("avg_batch_time_sec_std"),
                     "count": metrics.get("count"),

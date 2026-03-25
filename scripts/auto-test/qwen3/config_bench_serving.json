@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "description": "Auto-test template for Qwen3 serving benchmark via sglang.bench_serving.",
+  "script_aliases": {
+    "run_bench_serving": "scripts/qwen3/run_bench_serving.sh"
+  },
+  "defaults": {
+    "cwd": ".",
+    "result_dir": "scripts/auto-test/qwen3/result/bench_serving",
+    "timeout_sec": 21600,
+    "restart_servers": true,
+    "stop_server_after_job": true,
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    }
+  },
+  "servers": {
+    "sglang": {
+      "enabled": true,
+      "start_script": "scripts/qwen3/sglang/start_sglang_server.sh",
+      "cwd": "scripts/qwen3/sglang",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "BATCH_SIZE": "BATCH_SIZE",
+        "HOST": "HOST",
+        "PORT": "PORT"
+      },
+      "ready": {
+        "endpoints": ["POST /generate", "/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    },
+    "vllm-http": {
+      "enabled": true,
+      "start_script": "scripts/qwen3/vllm/start_vllm_server.sh",
+      "cwd": "scripts/qwen3/vllm",
+      "args": [],
+      "env": {},
+      "numactl": {
+        "cores": "",
+        "cpunodebind": "",
+        "membind": ""
+      },
+      "env_from_job": {
+        "MODEL_DIR": "MODEL_DIR",
+        "SERVED_MODEL_NAME": "SERVED_MODEL_NAME",
+        "HOST": "HOST",
+        "PORT": "PORT"
+      },
+      "ready": {
+        "endpoints": ["/v1/models", "/health"],
+        "timeout_sec": 1800,
+        "interval_sec": 2
+      }
+    }
+  },
+  "jobs": []
+}

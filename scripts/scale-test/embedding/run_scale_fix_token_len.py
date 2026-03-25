@@ -417,6 +417,7 @@ class ScaleConfig:
     result_root: Path
     token_lens: List[str]
     batch_sizes: List[int]
+    batch_env_key: str
     repeats: int
     repeat_threshold_sec: Optional[float]
     repeat_max_repeats: int
@@ -426,6 +427,7 @@ class ScaleConfig:
     mem_gb: Optional[float]
     sglang_max_total_tokens: List[str]
     sweep_env_key: str
+    server_family: str
     server_template: Dict[str, Any]
     job_template: Dict[str, Any]
     job_emon_enable: bool
@@ -523,6 +525,14 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
     batch_sizes: List[int] = []
     if batch_sizes_raw is not None:
         batch_sizes = [int(x) for x in (batch_sizes_raw or [])]
+    batch_env_key = str(
+        bench.get("batch_env_key")
+        or bench.get("batch_size_env_key")
+        or run.get("batch_env_key")
+        or "BATCH_SIZE"
+    ).strip()
+    if not batch_env_key:
+        batch_env_key = "BATCH_SIZE"
 
     repeats = int(run.get("repeats") or 1)
 
@@ -592,6 +602,14 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
     server_template = raw.get("server_template") or {}
     if not isinstance(server_template, dict):
         raise SystemExit("config.server_template must be an object")
+    server_family = str(
+        server_template.get("server_family")
+        or server_template.get("task_family")
+        or server_template.get("family")
+        or "embedding"
+    ).strip().lower()
+    if not server_family:
+        server_family = "embedding"
 
     # Schema rule (intentional, no backward compat): EMON settings are a job/run concern.
     # Reject legacy top-level emon.
@@ -947,6 +965,7 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
         result_root=result_root,
         token_lens=token_lens,
         batch_sizes=batch_sizes,
+        batch_env_key=batch_env_key,
         repeats=repeats,
         repeat_threshold_sec=repeat_threshold_sec,
         repeat_max_repeats=repeat_max_repeats,
@@ -956,6 +975,7 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
         mem_gb=mem_gb_f,
         sglang_max_total_tokens=sglang_mtt,
         sweep_env_key=sweep_env_key,
+        server_family=server_family,
         server_template=server_template,
         job_template=job_template,
         job_emon_enable=bool(job_emon_enable),
@@ -2737,9 +2757,17 @@ def _generate_auto_test_config(
         if isinstance(servers, dict) and backend in servers and isinstance(servers.get(backend), dict):
             s = dict(servers[backend])
 
-            # Select backend start script based on requested device.
-            # NOTE: keep template default if device not specified.
-            if device:
+            # Select backend start script based on requested device and server family.
+            # NOTE: keep template default if device/family do not require an override.
+            if scale.server_family == "qwen3":
+                if backend == "sglang":
+                    if device == "cuda":
+                        s["start_script"] = "scripts/qwen3/sglang/start_sglang_server_cuda.sh"
+                    else:
+                        s["start_script"] = "scripts/qwen3/sglang/start_sglang_server.sh"
+                elif backend in {"vllm-http", "vllm"}:
+                    s["start_script"] = "scripts/qwen3/vllm/start_vllm_server.sh"
+            elif device:
                 if backend == "sglang":
                     if device == "cuda":
                         s["start_script"] = "scripts/embedding/sglang/start_sglang_server_cuda.sh"
@@ -2796,6 +2824,7 @@ def _generate_auto_test_config(
 
     jobs: List[Dict[str, Any]] = []
     repeats = max(1, int(scale.repeats))
+    batch_env_key = str(scale.batch_env_key or "BATCH_SIZE").strip() or "BATCH_SIZE"
     for bs in scale.batch_sizes:
         for tl in scale.token_lens:
             tl_s = str(tl).strip()
@@ -2809,10 +2838,13 @@ def _generate_auto_test_config(
                 else:
                     sweep_key = "SYNTHETIC_TOKEN_LEN"
 
-            if sweep_key == "SYNTHETIC_TOKEN_LEN" and tl_s.isdigit():
+            if sweep_key == "SYNTHETIC_TOKEN_LEN" and tl_s.isdigit() and batch_env_key == "BATCH_SIZE":
                 name = f"scale_fix_token_len_tok{int(tl_s)}_bs{int(bs)}_{model}_{backend}"
             else:
-                name = f"scale_fix_token_len_{_safe_name(sweep_key)}_{_safe_name(tl_s)}_bs{int(bs)}_{model}_{backend}"
+                name = (
+                    f"scale_fix_token_len_{_safe_name(sweep_key)}_{_safe_name(tl_s)}_"
+                    f"{_safe_name(batch_env_key)}_{int(bs)}_{model}_{backend}"
+                )
             if (variant_tag or "").strip():
                 name = f"{name}__{_safe_name(variant_tag)}"
 
@@ -2827,9 +2859,11 @@ def _generate_auto_test_config(
                 "BASE_URL": base_url,
                 "MODE": mode,
                 "MAX_SAMPLES": str(max_samples),
-                "BATCH_SIZE": str(int(bs) if int(bs) > 0 else batch_size_default),
+                "BATCH_SIZE": str(batch_size_default),
                 "DTYPE": dtype,
             }
+
+            env[batch_env_key] = str(int(bs) if int(bs) > 0 else batch_size_default)
 
             if device:
                 env["DEVICE"] = device
@@ -3214,7 +3248,10 @@ def _write_aggregate_csv(*, out_csv: Path, rows: List[Dict[str, Any]]) -> None:
         "batch_size",
         "token_len",
         "tps",
+        "qps",
         "latency_sec",
+        "mean_ttft_ms",
+        "mean_tpot_ms",
         "avg_batch_time_sec",
         "count",
         "num_batches",
@@ -3579,7 +3616,10 @@ def main() -> int:
                     "batch_size": "",
                     "token_len": "",
                     "tps": "",
+                    "qps": "",
                     "latency_sec": "",
+                    "mean_ttft_ms": "",
+                    "mean_tpot_ms": "",
                     "avg_batch_time_sec": "",
                     "count": "",
                     "num_batches": "",
