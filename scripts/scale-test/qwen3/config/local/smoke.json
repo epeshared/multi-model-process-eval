@@ -4,10 +4,35 @@
   "template_auto_test_config": "scripts/auto-test/qwen3/config_bench_serving.json",
   "result_root": "scripts/scale-test/qwen3/result/bench_serving_smoke",
   "run": {
-    "sweep_env_key": "RANDOM_INPUT_LEN",
-    "sweep_values": [
-      "1024"
-    ],
+    "DATASET_NAME": {
+      "value": "random-ids"
+    },
+    "TOKENIZE_PROMPT": {
+      "value": "1"
+    },
+    "NUM_PROMPTS": {
+      "value": "64"
+    },
+    "RANDOM_INPUT_LEN": {
+      "sweep_values": [
+        "1024"
+      ]
+    },
+    "RANDOM_OUTPUT_LEN": {
+      "value": "128"
+    },
+    "RANDOM_RANGE_RATIO": {
+      "value": "0.5"
+    },
+    "REQUEST_RATE": {
+      "value": "inf"
+    },
+    "WARMUP_REQUESTS": {
+      "value": "1"
+    },
+    "BENCH_DISABLE_TQDM": {
+      "value": "1"
+    },
     "bench": {
       "batch_env_key": "MAX_CONCURRENCY",
       "batch_sizes": [
@@ -55,16 +80,6 @@
     "batch_size": 16,
     "dtype": "bfloat16",
     "restart_servers": true,
-    "stop_server_after_job": true,
-    "extra_env": {
-      "DATASET_NAME": "random-ids",
-      "TOKENIZE_PROMPT": "1",
-      "NUM_PROMPTS": "64",
-      "RANDOM_OUTPUT_LEN": "128",
-      "RANDOM_RANGE_RATIO": "0.5",
-      "REQUEST_RATE": "inf",
-      "WARMUP_REQUESTS": "1",
-      "BENCH_DISABLE_TQDM": "1"
-    }
+    "stop_server_after_job": true
   }
 }

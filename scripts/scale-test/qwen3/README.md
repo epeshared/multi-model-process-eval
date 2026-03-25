@@ -26,6 +26,7 @@ The default local target is `Qwen/Qwen3-0.6B`.
 ## What is swept
 
 - `run.sweep_env_key = RANDOM_INPUT_LEN`
+- multi-axis sweeps can also be written as sibling blocks under `run`, for example `run.RANDOM_INPUT_LEN.sweep_values`, `run.RANDOM_OUTPUT_LEN.sweep_values`, `run.NUM_PROMPTS.sweep_values`
 - `run.bench.batch_env_key = MAX_CONCURRENCY`
 
 This means the generic runner reuses:
@@ -34,6 +35,8 @@ This means the generic runner reuses:
 - `batch_sizes` for `--max-concurrency`
 
 while keeping server-side `BATCH_SIZE` independent in `server_template.batch_size`.
+
+Workload parameters belong under `run`: use `run.<ENV>.sweep_values` for sweepable knobs and `run.<ENV>.value` for fixed knobs. Reserve `server_template.extra_env` for actual server-side overrides.
 
 ## Benchmark shape
 

@@ -1496,10 +1496,109 @@ def _extract_prefixed_json_line(text: str, prefix: str) -> Optional[Dict[str, An
     return last_obj
 
 
+def _extract_last_bench_serving_summary(text: str) -> str:
+    lines = text.splitlines()
+    blocks: List[str] = []
+    collecting = False
+    current: List[str] = []
+
+    for line in lines:
+        if "Serving Benchmark Result" in line and re.match(r"^=+.*Serving Benchmark Result.*=+$", line.strip()):
+            collecting = True
+            current = [line]
+            continue
+        if not collecting:
+            continue
+        current.append(line)
+        if re.match(r"^=+$", line.strip()):
+            blocks.append("\n".join(current))
+            collecting = False
+            current = []
+
+    return blocks[-1] if blocks else ""
+
+
+def _bench_serving_text_value_to_number(raw: str) -> Any:
+    s = str(raw or "").strip()
+    if not s:
+        return s
+    if s.lower() in {"inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}:
+        try:
+            return float(s)
+        except Exception:
+            return s
+    try:
+        if re.fullmatch(r"[-+]?\d+", s):
+            return int(s)
+        return float(s)
+    except Exception:
+        return s
+
+
+def _parse_bench_serving_text_summary(stdout_stderr: str) -> Optional[Dict[str, Any]]:
+    summary_text = _extract_last_bench_serving_summary(stdout_stderr)
+    if not summary_text:
+        return None
+
+    label_map = {
+        "Backend": "backend",
+        "Traffic request rate": "traffic_request_rate",
+        "Max request concurrency": "max_concurrency",
+        "Successful requests": "completed",
+        "Benchmark duration (s)": "benchmark_duration_sec",
+        "Total input tokens": "total_input_tokens",
+        "Total input text tokens": "total_input_text_tokens",
+        "Total generated tokens": "total_generated_tokens",
+        "Total generated tokens (retokenized)": "total_generated_tokens_retokenized",
+        "Request throughput (req/s)": "request_throughput",
+        "Input token throughput (tok/s)": "input_throughput",
+        "Output token throughput (tok/s)": "output_throughput",
+        "Peak output token throughput (tok/s)": "peak_output_throughput",
+        "Peak concurrent requests": "peak_concurrent_requests",
+        "Total token throughput (tok/s)": "total_token_throughput",
+        "Concurrency": "concurrency",
+        "Mean E2E Latency (ms)": "mean_e2e_latency_ms",
+        "Median E2E Latency (ms)": "median_e2e_latency_ms",
+        "P90 E2E Latency (ms)": "p90_e2e_latency_ms",
+        "P99 E2E Latency (ms)": "p99_e2e_latency_ms",
+        "Mean TTFT (ms)": "mean_ttft_ms",
+        "Median TTFT (ms)": "median_ttft_ms",
+        "P99 TTFT (ms)": "p99_ttft_ms",
+        "Mean TPOT (ms)": "mean_tpot_ms",
+        "Median TPOT (ms)": "median_tpot_ms",
+        "P99 TPOT (ms)": "p99_tpot_ms",
+        "Mean ITL (ms)": "mean_itl_ms",
+        "Median ITL (ms)": "median_itl_ms",
+        "P95 ITL (ms)": "p95_itl_ms",
+        "P99 ITL (ms)": "p99_itl_ms",
+        "Max ITL (ms)": "max_itl_ms",
+    }
+
+    obj: Dict[str, Any] = {}
+    for line in summary_text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("=") or re.match(r"^-{3,}.*-{3,}$", s):
+            continue
+        if ":" not in s:
+            continue
+        label, value = s.split(":", 1)
+        label = label.strip()
+        key = label_map.get(label)
+        if not key:
+            continue
+        obj[key] = _bench_serving_text_value_to_number(value)
+
+    if not obj:
+        return None
+    return obj
+
+
 def _parse_bench_serving_metrics(stdout_stderr: str) -> Dict[str, Any]:
     obj = _extract_prefixed_json_line(stdout_stderr, "[run_bench_serving] RESULT_JSON")
     if not obj:
-        return {"parse_error": "no_bench_serving_json_found"}
+        obj = _parse_bench_serving_text_summary(stdout_stderr)
+    if not obj:
+        return {"parse_error": "no_bench_serving_summary_found"}
 
     latency_sec: Optional[float] = None
     try:

@@ -6,6 +6,7 @@ import csv
 import datetime as dt
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import socket
@@ -418,6 +419,8 @@ class ScaleConfig:
     token_lens: List[str]
     batch_sizes: List[int]
     batch_env_key: str
+    run_extra_env: Dict[str, Any]
+    sweep_values_by_env: Dict[str, List[str]]
     repeats: int
     repeat_threshold_sec: Optional[float]
     repeat_max_repeats: int
@@ -450,6 +453,10 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
     job_template = run.get("job_template") or {}
     if not isinstance(job_template, dict):
         raise SystemExit("config.run.job_template must be an object")
+
+    run_extra_env = run.get("extra_env") or {}
+    if not isinstance(run_extra_env, dict):
+        raise SystemExit("config.run.extra_env must be an object")
 
     # Schema rule (intentional, no backward compat): benchmark sweep fields live under run.bench.
     bench = run.get("bench") or {}
@@ -511,15 +518,95 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
     sweep_values_raw = run.get("sweep_values")
 
     token_lens: List[str] = []
-    if sweep_env_key and sweep_values_raw is not None:
+    sweep_values_by_env: Dict[str, List[str]] = {}
+    sibling_run_extra_env: Dict[str, Any] = {}
+    if isinstance(sweep_values_raw, dict):
+        for raw_key, raw_values in sweep_values_raw.items():
+            key = str(raw_key).strip()
+            if not key:
+                raise SystemExit("config.run.sweep_values contains an empty env key")
+            values = [str(x).strip() for x in (raw_values or []) if str(x).strip()]
+            if not values:
+                raise SystemExit(f"config.run.sweep_values.{key} is empty")
+            sweep_values_by_env[key] = values
+        if not sweep_values_by_env:
+            raise SystemExit("config.run.sweep_values is empty")
+        if not sweep_env_key:
+            sweep_env_key = next(iter(sweep_values_by_env.keys()))
+        elif sweep_env_key not in sweep_values_by_env:
+            raise SystemExit(
+                f"config.run.sweep_env_key={sweep_env_key!r} is not present in config.run.sweep_values"
+            )
+        token_lens = list(sweep_values_by_env[sweep_env_key])
+    elif sweep_env_key and sweep_values_raw is not None:
         token_lens = [str(x).strip() for x in (sweep_values_raw or []) if str(x).strip()]
         if not token_lens:
             raise SystemExit("config.run.sweep_values is empty")
+        sweep_values_by_env[sweep_env_key] = list(token_lens)
     else:
-        token_lens_int = [int(x) for x in (bench.get("token_lens") or [])]
-        if not token_lens_int:
-            raise SystemExit("config.run.bench.token_lens is empty")
-        token_lens = [str(int(x)) for x in token_lens_int]
+        reserved_run_keys = {
+            "bench",
+            "job_template",
+            "ssh",
+            "memory",
+            "repeats",
+            "repeat_threshold_sec",
+            "repeat_threshold",
+            "repeat-threshold",
+            "repeat_threash_hold",
+            "repeat-threash-hold",
+            "repeat_threash_hold_sec",
+            "repeat-threash-hold-sec",
+            "repeat_max_repeats",
+            "repeat_max",
+            "max_repeats",
+            "warmup_runs",
+            "continue_on_error",
+            "continue_on_failure",
+            "sweep_env_key",
+            "sweep_key",
+            "sweep_values",
+            "batch_env_key",
+            "extra_env",
+        }
+        for raw_key, raw_value in run.items():
+            key = str(raw_key).strip()
+            if not key or key in reserved_run_keys:
+                continue
+            if not isinstance(raw_value, dict):
+                continue
+            if "sweep_values" in raw_value:
+                raw_values = raw_value.get("sweep_values")
+                values = [str(x).strip() for x in (raw_values or []) if str(x).strip()]
+                if not values:
+                    raise SystemExit(f"config.run.{key}.sweep_values is empty")
+                sweep_values_by_env[key] = values
+                continue
+            for value_key in ["value", "fixed_value", "env_value"]:
+                if value_key in raw_value:
+                    value = raw_value.get(value_key)
+                    if value is None or str(value).strip() == "":
+                        raise SystemExit(f"config.run.{key}.{value_key} is empty")
+                    sibling_run_extra_env[key] = str(value)
+                    break
+
+        if sweep_values_by_env:
+            if not sweep_env_key:
+                sweep_env_key = next(iter(sweep_values_by_env.keys()))
+            elif sweep_env_key not in sweep_values_by_env:
+                raise SystemExit(
+                    f"config.run.sweep_env_key={sweep_env_key!r} is not present in run.<ENV>.sweep_values"
+                )
+            token_lens = list(sweep_values_by_env[sweep_env_key])
+        else:
+            token_lens_int = [int(x) for x in (bench.get("token_lens") or [])]
+            if not token_lens_int:
+                raise SystemExit("config.run.bench.token_lens is empty")
+            token_lens = [str(int(x)) for x in token_lens_int]
+
+    if sibling_run_extra_env:
+        run_extra_env = dict(run_extra_env)
+        run_extra_env.update(sibling_run_extra_env)
 
     batch_sizes_raw = bench.get("batch_sizes")
     batch_sizes: List[int] = []
@@ -966,6 +1053,8 @@ def _parse_scale_config_raw(raw: Dict[str, Any], *, resolve_ssh_passwords: bool 
         token_lens=token_lens,
         batch_sizes=batch_sizes,
         batch_env_key=batch_env_key,
+        run_extra_env=run_extra_env,
+        sweep_values_by_env=sweep_values_by_env,
         repeats=repeats,
         repeat_threshold_sec=repeat_threshold_sec,
         repeat_max_repeats=repeat_max_repeats,
@@ -2699,9 +2788,11 @@ def _generate_auto_test_config(
     restart_servers = bool(jt.get("restart_servers", True))
     stop_server_after_job = bool(jt.get("stop_server_after_job", True))
     emon_enable = bool(scale.job_emon_enable)
-    extra_env = jt.get("extra_env") or {}
-    if not isinstance(extra_env, dict):
-        extra_env = {}
+    extra_env = dict(scale.run_extra_env or {})
+    server_extra_env = jt.get("extra_env") or {}
+    if not isinstance(server_extra_env, dict):
+        server_extra_env = {}
+    extra_env.update(server_extra_env)
 
     # Device selection (cpu/cuda) via scale-test JSON.
     # This controls which SGLang start script is used.
@@ -2825,24 +2916,34 @@ def _generate_auto_test_config(
     jobs: List[Dict[str, Any]] = []
     repeats = max(1, int(scale.repeats))
     batch_env_key = str(scale.batch_env_key or "BATCH_SIZE").strip() or "BATCH_SIZE"
+    sweep_key = str(scale.sweep_env_key or "").strip()
+    if not sweep_key:
+        if str(mode or "").strip().lower() in {"input_len", "input", "len", "char", "chars"}:
+            sweep_key = "SYNTHETIC_INPUT_LEN"
+        else:
+            sweep_key = "SYNTHETIC_TOKEN_LEN"
+    sweep_values_by_env = dict(scale.sweep_values_by_env or {})
+    if not sweep_values_by_env:
+        sweep_values_by_env[sweep_key] = [str(tl).strip() for tl in scale.token_lens]
+    sweep_items = list(sweep_values_by_env.items())
+    sweep_value_lists = [vals for _, vals in sweep_items]
+
     for bs in scale.batch_sizes:
-        for tl in scale.token_lens:
-            tl_s = str(tl).strip()
+        for sweep_combo in itertools.product(*sweep_value_lists):
+            sweep_env = {
+                key: str(value).strip()
+                for (key, _), value in zip(sweep_items, sweep_combo)
+            }
+            tl_s = str(sweep_env.get(sweep_key) or "").strip()
 
-            # Determine which env var represents the sweep axis.
-            sweep_key = str(scale.sweep_env_key or "").strip()
-            if not sweep_key:
-                # Backward compatibility for the original token_len runner.
-                if str(mode or "").strip().lower() in {"input_len", "input", "len", "char", "chars"}:
-                    sweep_key = "SYNTHETIC_INPUT_LEN"
-                else:
-                    sweep_key = "SYNTHETIC_TOKEN_LEN"
-
-            if sweep_key == "SYNTHETIC_TOKEN_LEN" and tl_s.isdigit() and batch_env_key == "BATCH_SIZE":
+            if len(sweep_items) == 1 and sweep_key == "SYNTHETIC_TOKEN_LEN" and tl_s.isdigit() and batch_env_key == "BATCH_SIZE":
                 name = f"scale_fix_token_len_tok{int(tl_s)}_bs{int(bs)}_{model}_{backend}"
             else:
+                sweep_name = "_".join(
+                    f"{_safe_name(key)}_{_safe_name(value)}" for key, value in sweep_env.items()
+                )
                 name = (
-                    f"scale_fix_token_len_{_safe_name(sweep_key)}_{_safe_name(tl_s)}_"
+                    f"scale_fix_token_len_{sweep_name}_"
                     f"{_safe_name(batch_env_key)}_{int(bs)}_{model}_{backend}"
                 )
             if (variant_tag or "").strip():
@@ -2862,14 +2963,6 @@ def _generate_auto_test_config(
                 "BATCH_SIZE": str(batch_size_default),
                 "DTYPE": dtype,
             }
-
-            env[batch_env_key] = str(int(bs) if int(bs) > 0 else batch_size_default)
-
-            if device:
-                env["DEVICE"] = device
-
-            # Set the sweep value into the desired env key.
-            env[sweep_key] = tl_s
 
             # For HTTP backends, large batch sizes on CPU can exceed the default
             # 120s request timeout during warmup/first runs.
@@ -2893,6 +2986,15 @@ def _generate_auto_test_config(
             # Merge user-provided env first (can override any defaults).
             for k, v in extra_env.items():
                 env[str(k)] = str(v)
+
+            env[batch_env_key] = str(int(bs) if int(bs) > 0 else batch_size_default)
+
+            if device:
+                env["DEVICE"] = device
+
+            # Sweep values override fixed env values when both are present.
+            for env_key, env_value in sweep_env.items():
+                env[env_key] = env_value
 
             # Optional sweep override (server + job): SGLANG_MAX_TOTAL_TOKENS.
             if str(sglang_max_total_tokens or "").strip():
