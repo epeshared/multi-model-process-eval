@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "description": "Scale-test (Qwen3): sweep input length and max concurrency for Qwen3-0.6B via sglang.bench_serving.",
+  "template_auto_test_config": "scripts/auto-test/qwen3/config_bench_serving.json",
+  "result_root": "scripts/scale-test/qwen3/result/bench_serving",
+  "run": {
+    "DATASET_NAME": {
+      "value": "random-ids"
+    },
+    "TOKENIZE_PROMPT": {
+      "value": "1"
+    },
+    "NUM_PROMPTS": {
+      "sweep_values": [
+        "5"
+      ]
+    },
+    "RANDOM_INPUT_LEN": {
+      "sweep_values": [
+        "372"
+      ]
+    },
+    "RANDOM_OUTPUT_LEN": {
+      "sweep_values": [
+        "1024"
+      ]
+    },
+    "RANDOM_RANGE_RATIO": {
+      "value": "0.5"
+    },
+    "REQUEST_RATE": {
+      "value": "inf"
+    },
+    "WARMUP_REQUESTS": {
+      "value": "1"
+    },
+    "BENCH_DISABLE_TQDM": {
+      "value": "1"
+    },
+    "bench": {
+      "batch_env_key": "MAX_CONCURRENCY",
+      "batch_sizes": [
+        1,
+        2,
+        4
+      ],
+      "cpu": {
+        "cpus": [
+          "0-95"
+        ]
+      },
+      "sglang_max_total_tokens": [
+        "65536",
+        "131072"
+      ]
+    },
+    "job_template": {
+      "repeat_threshold_sec": 3,
+      "repeat_max_repeats": 20,
+      "warmup_runs": 0,
+      "continue_on_error": true,
+      "emon": {
+        "emon_enable": false,
+        "process_after_run": false,
+        "process_cmd": [
+          "emon",
+          "-process-pyedp",
+          "/opt/intel/sep/config/edp/pyedp_config.txt"
+        ],
+        "expected_output": "summary.xlsx"
+      }
+    }
+  },
+  "server_template": {
+    "script": "run_bench_serving",
+    "server_family": "qwen3",
+    "backend": "sglang",
+    "conda_env": "sglang-cpu",
+    "device": "cpu",
+    "model": "qwen3-3b-moe",
+    "model_dir": "/mnt/nvme2n1p1/xtang/models/Qwen/Qwen3-3B-MOE",
+    "served_model_name": "qwen3-3b-moe",
+    "model_id": "Qwen/Qwen3-3B-MOE",
+    "host": "0.0.0.0",
+    "port": 30100,
+    "base_url": "http://127.0.0.1:30100",
+    "batch_size": 16,
+    "dtype": "bfloat16",
+    "restart_servers": true,
+    "stop_server_after_job": true
+  }
+}
