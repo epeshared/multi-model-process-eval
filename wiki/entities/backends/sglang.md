@@ -66,6 +66,37 @@ The server script preloads for performance:
 - `libtbbmalloc.so.2` — Intel TBB scalable allocator
 - `libiomp5.so` — Intel OpenMP runtime (auto-discovered, optional)
 
+## Qwen3 LLM Server Differences
+
+The Qwen3 LLM server (`scripts/qwen3/sglang/start_sglang_server.sh`) differs from the embedding server:
+
+- No `--is-embedding` flag (generative mode)
+- `--device ${DEVICE}` (supports both `cpu` and `cuda`)
+- `--disable-cuda-graph --disable-piecewise-cuda-graph` on CPU
+- `--max-total-tokens` default 65536 (larger context window)
+- No `--attention-backend intel_amx` or `--enable-tokenizer-batch-encode`
+
+## Server Scripts
+
+| Task | Script | Key Flags |
+|------|--------|-----------|
+| Embedding | `scripts/embedding/sglang/start_sglang_server.sh` | `--is-embedding --attention-backend intel_amx` |
+| Qwen3 LLM | `scripts/qwen3/sglang/start_sglang_server.sh` | `--disable-cuda-graph` |
+| VL | `scripts/vl/sglang/start_sglang_server.sh` | `--enable-multimodal` |
+| VL (CUDA) | `scripts/vl/sglang/start_sglang_server_cuda.sh` | `--device cuda` |
+| Omni | `scripts/omni/sglang/start_sglang_server.sh` | `--enable-multimodal` |
+| Omni (CUDA) | `scripts/omni/sglang/start_sglang_server_cuda.sh` | `--device cuda` |
+
+## Profiling Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/start_profile` | POST | Start torch profiler (output to `SGLANG_TORCH_PROFILER_DIR`) |
+| `/stop_profile` | POST | Stop profiler and flush traces |
+| `/health` | GET | Health check |
+
+See [Profiling & Tracing](../../guides/profiling-and-tracing.md) for usage.
+
 ## Supported Tasks
 
 | Task | HTTP | Offline |
@@ -73,11 +104,14 @@ The server script preloads for performance:
 | [Embedding](../tasks/embedding.md) | ✅ | ✅ |
 | [Qwen3 LLM](../tasks/qwen3-llm.md) | ✅ | — |
 | [VL](../tasks/vl.md) | ✅ | ✅ |
+| [VL-Embedding](../tasks/vl-embedding.md) | ✅ | — |
 | [Omni](../tasks/omni.md) | ✅ | — |
 
 ## Related
 
 - [vLLM Backend](vllm.md) — alternative serving backend
+- [CPU Optimization Guide](../../guides/cpu-optimization.md) — LD_PRELOAD, AMX
+- [Environment Variables](../../guides/environment-variables.md) — SGLANG_* vars
 - [Torch Backend](torch.md) — local transformers inference
 - [CPU Optimization Guide](../../guides/cpu-optimization.md)
 - [AMX](../../concepts/amx.md)

@@ -1,7 +1,7 @@
 ---
 title: Wiki Index
 created: 2026-04-10
-updated: 2026-04-10
+updated: 2026-04-11
 tags: [meta]
 ---
 
@@ -42,6 +42,7 @@ Content catalog for the multi-model-process-eval knowledge base.
 | [Qwen3 LLM](entities/tasks/qwen3-llm.md) | LLM chat / text generation task | 2026-04-10 |
 | [VL](entities/tasks/vl.md) | Vision-language chat task | 2026-04-10 |
 | [Omni](entities/tasks/omni.md) | Multimodal (image + audio) chat task | 2026-04-10 |
+| [VL-Embedding](entities/tasks/vl-embedding.md) | Image-only embedding via VL model encoders | 2026-04-11 |
 
 ## Concepts
 
@@ -53,6 +54,7 @@ Content catalog for the multi-model-process-eval knowledge base.
 | [Torch Compile](concepts/torch-compile.md) | PyTorch 2.x torch.compile for inference acceleration | 2026-04-10 |
 | [KV Cache](concepts/kv-cache.md) | Key-Value cache management for transformer inference | 2026-04-10 |
 | [Batch Size Tuning](concepts/batch-size-tuning.md) | Batch size impact on throughput and latency | 2026-04-10 |
+| [EMON](concepts/emon.md) | Intel EMON energy monitoring for power-aware benchmarking | 2026-04-11 |
 
 ## Guides
 
@@ -63,6 +65,10 @@ Content catalog for the multi-model-process-eval knowledge base.
 | [Adding a New Backend](guides/adding-backend.md) | How to add a new backend implementation | 2026-04-10 |
 | [Running Benchmarks](guides/running-benchmarks.md) | End-to-end benchmark workflow | 2026-04-10 |
 | [Remote Deployment](guides/remote-deployment.md) | Multi-host SSH deployment, bootstrap, and remote testing | 2026-04-11 |
+| [Agent Skills Reference](guides/agent-skills-reference.md) | All 20 agent skills with parameters and examples | 2026-04-11 |
+| [Auto-Test Framework](guides/auto-test-framework.md) | JSON-driven automated benchmark runner (config schema, EMON, affinity) | 2026-04-11 |
+| [Profiling & Tracing](guides/profiling-and-tracing.md) | Torch profiler, SGLang server profiling, Chrome trace viewer | 2026-04-11 |
+| [Environment Variables](guides/environment-variables.md) | Complete reference of 60+ environment variables across all backends | 2026-04-11 |
 
 ## Comparisons
 

@@ -14,6 +14,7 @@ Complete feature support across all backends and tasks.
 | Task | torch | sglang HTTP | sglang offline | vllm HTTP | vllm offline |
 |------|:-----:|:-----------:|:--------------:|:---------:|:------------:|
 | Embedding | ✅ | ✅ | ✅ | ✅ | ✅ |
+| VL-Embedding | — | ✅ | — | ✅ | — |
 | Qwen3 LLM | — | ✅ | — | ✅ | — |
 | VL | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Omni | — | ✅ | — | ✅ | ✅ |
@@ -53,3 +54,5 @@ Complete feature support across all backends and tasks.
 
 - [SGLang vs vLLM — Embedding](sglang-vs-vllm-embedding.md)
 - [Adding a New Backend](../guides/adding-backend.md)
+- [VL-Embedding Task](../entities/tasks/vl-embedding.md)
+- [Environment Variables](../guides/environment-variables.md)

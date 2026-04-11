@@ -81,6 +81,30 @@ For multi-socket systems:
 
 On CPU, overlapping decode/prefill can hurt throughput. Disable for predictable serial execution.
 
+## 9. sitecustomize.py Startup Hook
+
+The project includes a `sitecustomize.py` at the repo root that is auto-imported by Python on startup (when running from the repo directory). It performs two patches:
+
+1. **OpenAI SDK type fix** — adds `ChatCompletionFunctionToolParam` if missing from the installed SDK version (compatibility shim for different openai package versions)
+2. **SGLANG_DISABLE_AMX workaround** — when `SGLANG_DISABLE_AMX=1`, monkey-patches SGLang's AMX fast-paths to avoid segfaults on certain CPU/NUMA configurations
+
+```bash
+# If you hit segfaults in AMX attention on specific NUMA setups:
+export SGLANG_DISABLE_AMX=1
+```
+
+## 10. libiomp5 Discovery Chain
+
+The SGLang server script searches for `libiomp5.so` in this order:
+
+1. `SGLANG_LIB_IOMP` (explicit override)
+2. Active Python env: `{PY_PREFIX}/lib/libiomp5.so`
+3. System: `/usr/lib/x86_64-linux-gnu/libiomp5.so`
+4. `ldconfig -p` lookup
+5. Other conda envs under the same conda root
+
+If not found, continues without it (warn). Set `SGLANG_REQUIRE_IOMP=1` to fail hard.
+
 ## Checklist
 
 - [ ] AMX ISA enabled
@@ -90,9 +114,12 @@ On CPU, overlapping decode/prefill can hurt throughput. Disable for predictable 
 - [ ] MALLOC_ARENA_MAX=1
 - [ ] NUMA pinning configured
 - [ ] Overlap schedule disabled
+- [ ] sitecustomize.py present (OpenAI SDK + AMX workaround)
 
 ## Related
 
 - [AMX](../concepts/amx.md) | [Torch Compile](../concepts/torch-compile.md) | [KV Cache](../concepts/kv-cache.md)
 - [Multi-Instance Guide](multi-instance.md)
 - [SGLang Backend](../entities/backends/sglang.md)
+- [Environment Variables Reference](environment-variables.md)
+- [Profiling & Tracing](profiling-and-tracing.md)
