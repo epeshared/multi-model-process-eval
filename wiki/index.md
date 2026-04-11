@@ -62,6 +62,7 @@ Content catalog for the multi-model-process-eval knowledge base.
 | [Multi-Instance](guides/multi-instance.md) | Running multiple server instances with CPU affinity and memory caps | 2026-04-10 |
 | [Adding a New Backend](guides/adding-backend.md) | How to add a new backend implementation | 2026-04-10 |
 | [Running Benchmarks](guides/running-benchmarks.md) | End-to-end benchmark workflow | 2026-04-10 |
+| [Remote Deployment](guides/remote-deployment.md) | Multi-host SSH deployment, bootstrap, and remote testing | 2026-04-11 |
 
 ## Comparisons
 

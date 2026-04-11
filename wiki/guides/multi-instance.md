@@ -78,4 +78,6 @@ python run_auto_test.py --config config_fix_token_len.json
 
 - [KV Cache](../concepts/kv-cache.md)
 - [CPU Optimization Guide](cpu-optimization.md)
+- [Remote Deployment Guide](remote-deployment.md) — multi-host SSH deployment and remote testing
+- [Batch Size Tuning](../concepts/batch-size-tuning.md)
 - [Batch Size Tuning](../concepts/batch-size-tuning.md)

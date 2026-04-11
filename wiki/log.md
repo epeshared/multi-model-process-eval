@@ -9,6 +9,10 @@ tags: [meta]
 
 Chronological record of wiki operations.
 
+## [2026-04-11] create | Remote Deployment Guide
+- Summary: Created comprehensive guide for multi-host SSH deployment, pre-requirements bootstrap, remote execution flow, result collection, and resume support
+- Pages touched: wiki/guides/remote-deployment.md (new), wiki/index.md, wiki/guides/multi-instance.md, wiki/guides/running-benchmarks.md, wiki/log.md
+
 ## [2026-04-10] init | Wiki bootstrapped from codebase analysis
 
 - Summary: Initial wiki creation by analyzing the full codebase of multi-model-process-eval

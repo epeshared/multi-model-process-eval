@@ -97,4 +97,5 @@ Output: CSV with mean ± std across repeats.
 
 - [CPU Optimization Guide](cpu-optimization.md)
 - [Multi-Instance Guide](multi-instance.md)
+- [Remote Deployment Guide](remote-deployment.md) — automated multi-host SSH testing
 - [Batch Size Tuning](../concepts/batch-size-tuning.md)
